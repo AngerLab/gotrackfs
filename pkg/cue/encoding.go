@@ -3,6 +3,7 @@ package cue
 import (
 	"bytes"
 	"io"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/saintfish/chardet"
@@ -12,11 +13,14 @@ import (
 )
 
 // DecodeBytes detects the character encoding of the given byte slice
-// and transcodes it into a valid UTF-8 string.
+// and transcodes it into a valid UTF-8 string without Byte Order Marks (BOM).
 func DecodeBytes(b []byte) (string, error) {
+	// Strip UTF-8 BOM prefix if present
+	b = bytes.TrimPrefix(b, []byte("\xef\xbb\xbf"))
+
 	// 1. Fast path: already valid UTF-8
 	if utf8.Valid(b) {
-		return string(b), nil
+		return cleanBOM(string(b)), nil
 	}
 
 	// 2. High-precision heuristic for Cyrillic (Windows-1251):
@@ -28,7 +32,7 @@ func DecodeBytes(b []byte) (string, error) {
 	if isLikelyWindows1251(b) {
 		decoded, _, err := transform.String(charmap.Windows1251.NewDecoder(), string(b))
 		if err == nil && utf8.ValidString(decoded) {
-			return decoded, nil
+			return cleanBOM(decoded), nil
 		}
 	}
 
@@ -40,13 +44,18 @@ func DecodeBytes(b []byte) (string, error) {
 		if err == nil {
 			decoded, err := io.ReadAll(reader)
 			if err == nil {
-				return string(decoded), nil
+				return cleanBOM(string(decoded)), nil
 			}
 		}
 	}
 
 	// 4. Fallback to raw string
-	return string(b), nil
+	return cleanBOM(string(b)), nil
+}
+
+// cleanBOM strips leading zero-width BOM rune if present in decoded string.
+func cleanBOM(s string) string {
+	return strings.TrimPrefix(s, "\ufeff")
 }
 
 // isLikelyWindows1251 checks if the non-ASCII bytes strongly correlate with CP1251 Cyrillic.
@@ -71,7 +80,7 @@ func isLikelyWindows1251(b []byte) bool {
 	return float64(c1251Letters)/float64(nonASCII) >= 0.80
 }
 
-// DecodeReader reads all bytes from r and converts them into UTF-8.
+// DecodeReader reads all bytes from r and converts them into UTF-8 without BOM.
 func DecodeReader(r io.Reader) (string, error) {
 	b, err := io.ReadAll(r)
 	if err != nil {

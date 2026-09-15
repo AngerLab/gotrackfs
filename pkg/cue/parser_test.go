@@ -170,3 +170,56 @@ func TestParseRealCUEFiles(t *testing.T) {
 		})
 	}
 }
+
+func TestParseTime_Validation(t *testing.T) {
+	tests := []struct {
+		input   string
+		wantSec float64
+		wantErr bool
+	}{
+		{"00:00:00", 0.0, false},
+		{"01:30:37", 90.0 + 37.0/75.0, false},
+		{"74:59:74", 74*60.0 + 59.0 + 74.0/75.0, false},
+		// Invalid seconds (>= 60)
+		{"05:80:00", 0, true},
+		{"00:60:00", 0, true},
+		// Invalid frames (>= 75)
+		{"05:00:75", 0, true},
+		{"05:00:99", 0, true},
+		// Negative values
+		{"-01:00:00", 0, true},
+		{"01:-05:00", 0, true},
+		{"01:00:-10", 0, true},
+		// Malformed format
+		{"01:00", 0, true},
+		{"abc:00:00", 0, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got, err := parseTime(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("parseTime(%q) error = %v, wantErr = %v", tt.input, err, tt.wantErr)
+			}
+			if !tt.wantErr && (got-tt.wantSec > 0.0001 || tt.wantSec-got > 0.0001) {
+				t.Errorf("parseTime(%q) = %f, want %f", tt.input, got, tt.wantSec)
+			}
+		})
+	}
+}
+
+func TestParse_BOMStripping(t *testing.T) {
+	cueWithBOM := "\xef\xbb\xbfTITLE \"Album With BOM\"\nPERFORMER \"BOM Artist\"\nFILE \"test.flac\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"Track 1\"\n    INDEX 01 00:00:00"
+	sheet, err := Parse(strings.NewReader(cueWithBOM))
+	if err != nil {
+		t.Fatalf("unexpected error parsing CUE with BOM: %v", err)
+	}
+
+	if sheet.Title != "Album With BOM" {
+		t.Errorf("Title = %q, want %q (BOM might not have been stripped)", sheet.Title, "Album With BOM")
+	}
+	if sheet.Performer != "BOM Artist" {
+		t.Errorf("Performer = %q, want %q", sheet.Performer, "BOM Artist")
+	}
+}
+

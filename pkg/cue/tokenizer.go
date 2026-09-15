@@ -3,6 +3,7 @@ package cue
 import (
 	"bytes"
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -12,6 +13,8 @@ import (
 // and unicode runes without corrupting multi-byte characters.
 func parseCommand(line string) (cmd string, params []string, err error) {
 	line = strings.TrimSpace(line)
+	// Strip zero-width BOM rune if it leaked into the line
+	line = strings.TrimPrefix(line, "\ufeff")
 	if len(line) == 0 {
 		return "", nil, nil
 	}
@@ -110,30 +113,28 @@ func parseCommand(line string) (cmd string, params []string, err error) {
 }
 
 // parseTime converts mm:ss:ff timestamp string into seconds (float64).
-// CD audio frames are 1/75th of a second.
+// Validates boundaries according to Red Book Audio CD specifications:
+// minutes >= 0, 0 <= seconds <= 59, 0 <= frames <= 74 (75 frames per second).
 func parseTime(s string) (float64, error) {
 	parts := strings.Split(strings.TrimSpace(s), ":")
 	if len(parts) != 3 {
 		return 0, fmt.Errorf("invalid time format %q, expected mm:ss:ff", s)
 	}
 
-	var mm, ss, ff float64
-	var err error
-	if mm, err = parseFloat(parts[0]); err != nil {
-		return 0, fmt.Errorf("invalid minutes in %q: %w", s, err)
-	}
-	if ss, err = parseFloat(parts[1]); err != nil {
-		return 0, fmt.Errorf("invalid seconds in %q: %w", s, err)
-	}
-	if ff, err = parseFloat(parts[2]); err != nil {
-		return 0, fmt.Errorf("invalid frames in %q: %w", s, err)
+	min, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil || min < 0 {
+		return 0, fmt.Errorf("invalid minutes %q in %q", parts[0], s)
 	}
 
-	return mm*60 + ss + ff/75.0, nil
-}
+	sec, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil || sec < 0 || sec > 59 {
+		return 0, fmt.Errorf("invalid seconds %q in %q (must be 0..59)", parts[1], s)
+	}
 
-func parseFloat(s string) (float64, error) {
-	var val float64
-	_, err := fmt.Sscanf(strings.TrimSpace(s), "%f", &val)
-	return val, err
+	frames, err := strconv.Atoi(strings.TrimSpace(parts[2]))
+	if err != nil || frames < 0 || frames > 74 {
+		return 0, fmt.Errorf("invalid frames %q in %q (must be 0..74)", parts[2], s)
+	}
+
+	return float64(min)*60.0 + float64(sec) + float64(frames)/75.0, nil
 }

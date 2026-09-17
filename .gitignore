@@ -1,5 +1,5 @@
 # Binaries
-gotrackfs
+/gotrackfs
 *.exe
 *.exe~
 *.dll
@@ -14,3 +14,6 @@ gotrackfs
 
 # macOS files
 .DS_Store
+
+# Playground
+.playground/

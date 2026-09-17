@@ -5,108 +5,116 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"unicode"
 )
 
-// parseCommand splits a CUE sheet line into command name and arguments.
-// Supports double quotes ("..."), single quotes ('...'), escaped characters (\", \\),
-// and unicode runes without corrupting multi-byte characters.
+// parseCommand is a string wrapper around parseCommandBytes for tests and convenience.
 func parseCommand(line string) (cmd string, params []string, err error) {
-	line = strings.TrimSpace(line)
-	// Strip zero-width BOM rune if it leaked into the line
-	line = strings.TrimPrefix(line, "\ufeff")
+	cmd, rawParams, err := parseCommandBytes([]byte(line))
+	if err != nil {
+		return "", nil, err
+	}
+	params = make([]string, len(rawParams))
+	for i, p := range rawParams {
+		params[i] = string(p)
+	}
+	return cmd, params, nil
+}
+
+// parseCommandBytes splits a CUE sheet line (in ASCII-compatible bytes)
+// into a command string and a slice of raw parameter byte slices.
+func parseCommandBytes(line []byte) (cmd string, params [][]byte, err error) {
+	line = bytes.TrimSpace(line)
 	if len(line) == 0 {
 		return "", nil, nil
 	}
 
-	runes := []rune(line)
-	l := len(runes)
-
-	// Extract command (first space-delimited word)
+	l := len(line)
 	i := 0
-	for i < l && !unicode.IsSpace(runes[i]) {
+
+	// Extract command (first ASCII word before whitespace)
+	for i < l && line[i] > ' ' {
 		i++
 	}
-	cmd = string(runes[:i])
+	cmd = strings.ToUpper(string(line[:i]))
 
-	// Skip spaces between command and parameters
-	for i < l && unicode.IsSpace(runes[i]) {
+	// Skip spaces after command
+	for i < l && line[i] <= ' ' {
 		i++
 	}
 
-	params = make([]string, 0)
-	var quoteChar rune = 0
+	params = make([][]byte, 0)
+	var quoteChar byte = 0
 	var buf bytes.Buffer
 
 	for ; i < l; i++ {
-		r := runes[i]
+		b := line[i]
 
 		if quoteChar == 0 {
-			if r == '"' || r == '\'' {
+			if b == '"' || b == '\'' {
 				if buf.Len() != 0 {
-					buf.WriteRune(r)
+					buf.WriteByte(b)
 				} else {
-					quoteChar = r
+					quoteChar = b
 				}
-			} else if unicode.IsSpace(r) {
+			} else if b <= ' ' { // ASCII whitespace
 				if buf.Len() > 0 {
-					params = append(params, buf.String())
+					params = append(params, bytes.Clone(buf.Bytes()))
 					buf.Reset()
 				}
-			} else if r == '\\' {
+			} else if b == '\\' {
 				if i+1 < l {
-					next := runes[i+1]
+					next := line[i+1]
 					switch next {
 					case '"', '\'', '\\':
-						buf.WriteRune(next)
+						buf.WriteByte(next)
 						i++
 					case 'n':
-						buf.WriteRune('\n')
+						buf.WriteByte('\n')
 						i++
 					case 't':
-						buf.WriteRune('\t')
+						buf.WriteByte('\t')
 						i++
 					default:
-						buf.WriteRune(r)
+						buf.WriteByte(b)
 					}
 				} else {
-					buf.WriteRune(r)
+					buf.WriteByte(b)
 				}
 			} else {
-				buf.WriteRune(r)
+				buf.WriteByte(b)
 			}
 		} else {
-			if r == quoteChar {
+			if b == quoteChar {
 				quoteChar = 0
-				params = append(params, buf.String())
+				params = append(params, bytes.Clone(buf.Bytes()))
 				buf.Reset()
-			} else if r == '\\' {
+			} else if b == '\\' {
 				if i+1 < l {
-					next := runes[i+1]
+					next := line[i+1]
 					switch next {
 					case '"', '\'', '\\':
-						buf.WriteRune(next)
+						buf.WriteByte(next)
 						i++
 					case 'n':
-						buf.WriteRune('\n')
+						buf.WriteByte('\n')
 						i++
 					case 't':
-						buf.WriteRune('\t')
+						buf.WriteByte('\t')
 						i++
 					default:
-						buf.WriteRune(r)
+						buf.WriteByte(b)
 					}
 				} else {
-					buf.WriteRune(r)
+					buf.WriteByte(b)
 				}
 			} else {
-				buf.WriteRune(r)
+				buf.WriteByte(b)
 			}
 		}
 	}
 
 	if buf.Len() > 0 || quoteChar != 0 {
-		params = append(params, buf.String())
+		params = append(params, bytes.Clone(buf.Bytes()))
 	}
 
 	return cmd, params, nil

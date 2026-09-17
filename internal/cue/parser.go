@@ -2,6 +2,7 @@ package cue
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -9,7 +10,12 @@ import (
 	"strings"
 )
 
-// ParseFile reads a CUE sheet from disk, auto-detects encoding, and parses it.
+type rawCommand struct {
+	cmd    string
+	params [][]byte
+}
+
+// ParseFile reads a CUE sheet from disk, performs two-pass parsing and encoding detection.
 func ParseFile(path string) (*Sheet, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -20,42 +26,80 @@ func ParseFile(path string) (*Sheet, error) {
 	return Parse(f)
 }
 
-// Parse reads CUE sheet data from an io.Reader, handles encoding detection, and parses it.
+// Parse reads CUE sheet data from an io.Reader and parses it using a two-pass architecture.
 func Parse(r io.Reader) (*Sheet, error) {
-	text, err := DecodeReader(r)
+	rawBytes, err := io.ReadAll(r)
 	if err != nil {
-		return nil, fmt.Errorf("decode cue: %w", err)
+		return nil, fmt.Errorf("read cue input: %w", err)
 	}
-
-	return ParseString(text)
+	return ParseBytes(rawBytes)
 }
 
-// ParseString parses decoded UTF-8 string into a Sheet structure.
+// ParseString wraps string input into ParseBytes.
 func ParseString(text string) (*Sheet, error) {
+	return ParseBytes([]byte(text))
+}
+
+// ParseBytes parses CUE sheet bytes in two passes with automatic encoding detection and BOM/UTF-16 sniffing.
+func ParseBytes(data []byte) (*Sheet, error) {
+	preprocessed, err := SniffAndPreprocess(data)
+	if err != nil {
+		return nil, err
+	}
+	return parsePreprocessed(preprocessed)
+}
+
+func parsePreprocessed(data []byte) (*Sheet, error) {
+	var rawCmds []rawCommand
+	var sampleBuf bytes.Buffer
+
+	// Pass 1: Byte-level tokenization & sample collection
+	sc := bufio.NewScanner(bytes.NewReader(data))
+	for sc.Scan() {
+		line := sc.Bytes()
+		cmd, params, err := parseCommandBytes(line)
+		if err != nil || cmd == "" {
+			continue
+		}
+
+		rawCmds = append(rawCmds, rawCommand{cmd: cmd, params: params})
+
+		// Collect text fields that might contain non-ASCII characters
+		switch cmd {
+		case "TITLE", "PERFORMER", "SONGWRITER", "FILE", "REM":
+			for _, p := range params {
+				for _, b := range p {
+					if b >= 128 {
+						sampleBuf.Write(p)
+						sampleBuf.WriteByte('\n')
+						break
+					}
+				}
+			}
+		}
+	}
+
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("scan cue bytes: %w", err)
+	}
+
+	// Detect encoding from concentrated text payload
+	charset := DetectEncoding(sampleBuf.Bytes())
+	decode := MakeDecoder(charset)
+
+	// Pass 2: Populate Sheet domain model with decoded values
 	sheet := &Sheet{}
 	var curFile *File
 	var curTrack *Track
 
-	sc := bufio.NewScanner(strings.NewReader(text))
-	lineNum := 0
-
-	for sc.Scan() {
-		lineNum++
-		line := strings.TrimSpace(sc.Text())
-		if len(line) == 0 {
-			continue
+	for _, rc := range rawCmds {
+		// Decode parameters to UTF-8
+		params := make([]string, len(rc.params))
+		for i, p := range rc.params {
+			params[i] = decode(p)
 		}
 
-		cmd, params, err := parseCommand(line)
-		if err != nil {
-			// Tolerant: continue on line parse quirks
-			continue
-		}
-		if cmd == "" {
-			continue
-		}
-
-		switch strings.ToUpper(cmd) {
+		switch rc.cmd {
 		case "TITLE":
 			if len(params) > 0 {
 				val := params[0]
@@ -108,7 +152,6 @@ func ParseString(text string) (*Sheet, error) {
 					dataType = params[1]
 				}
 
-				// If TRACK appears before any FILE, create a default implicit file entry
 				if curFile == nil {
 					sheet.Files = append(sheet.Files, File{
 						Name: "",
@@ -171,12 +214,8 @@ func ParseString(text string) (*Sheet, error) {
 			parseRem(params, sheet)
 
 		default:
-			// Postel's Law: ignore unknown commands without dying
+			// Postel's Law: ignore unknown commands
 		}
-	}
-
-	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("scan cue: %w", err)
 	}
 
 	calculateTrackBoundaries(sheet)
@@ -225,7 +264,6 @@ func calculateTrackBoundaries(sheet *Sheet) {
 				tracks[ti].Start = 0
 			}
 			if ti+1 < len(tracks) {
-				// The end of the current track is the next track's start or pregap
 				if tracks[ti+1].PreGap > 0 && tracks[ti+1].PreGap > tracks[ti].Start {
 					tracks[ti].End = tracks[ti+1].PreGap
 				} else {

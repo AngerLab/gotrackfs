@@ -1,9 +1,15 @@
 package cue
 
 import (
+	"bytes"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/text/encoding"
+	"golang.org/x/text/encoding/charmap"
+	"golang.org/x/text/encoding/korean"
+	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
 func TestTokenizer(t *testing.T) {
@@ -126,6 +132,33 @@ func TestParseRealCUEFiles(t *testing.T) {
 			wantGenre:     "",
 			wantTracks:    20,
 		},
+		{
+			name:          "Wind Rose - Wintersaga (WavPack, INDEX 00 pre-gaps)",
+			filename:      "wind_rose.cue",
+			wantPerformer: "Wind Rose",
+			wantTitle:     "Wintersaga",
+			wantDate:      "2019",
+			wantGenre:     "Epic Folk Metal",
+			wantTracks:    9,
+		},
+		{
+			name:          "Hamilton CD1 (Multi-file Broadway cast, cross-file INDEX 00)",
+			filename:      "hamilton.cue",
+			wantPerformer: "Original Broadway Cast",
+			wantTitle:     "Hamilton CD1",
+			wantDate:      "2015",
+			wantGenre:     "Musical",
+			wantTracks:    23,
+		},
+		{
+			name:          "Piknik - 45 CD1 (2025 release, Windows-1251 with Russian filenames)",
+			filename:      "piknik_45.cue",
+			wantPerformer: "Пикник",
+			wantTitle:     "45 CD1",
+			wantDate:      "2025",
+			wantGenre:     "Psychedelic Rock",
+			wantTracks:    15,
+		},
 	}
 
 	for _, tt := range tests {
@@ -223,3 +256,141 @@ func TestParse_BOMStripping(t *testing.T) {
 	}
 }
 
+func TestParse_UTF16(t *testing.T) {
+	// Create UTF-16LE bytes with BOM (FF FE)
+	cueText := `TITLE "UTF-16 Album"
+PERFORMER "UTF-16 Artist"
+FILE "track.flac" WAVE
+  TRACK 01 AUDIO
+    TITLE "Track 1"
+    INDEX 01 00:00:00`
+
+	var buf bytes.Buffer
+	buf.Write([]byte{0xff, 0xfe}) // UTF-16LE BOM
+	for _, r := range cueText {
+		buf.WriteByte(byte(r))
+		buf.WriteByte(byte(r >> 8))
+	}
+
+	sheet, err := Parse(&buf)
+	if err != nil {
+		t.Fatalf("unexpected error parsing UTF-16 CUE: %v", err)
+	}
+
+	if sheet.Title != "UTF-16 Album" {
+		t.Errorf("Title = %q, want %q", sheet.Title, "UTF-16 Album")
+	}
+	if sheet.Performer != "UTF-16 Artist" {
+		t.Errorf("Performer = %q, want %q", sheet.Performer, "UTF-16 Artist")
+	}
+}
+
+func TestParse_ShortEdgeCases(t *testing.T) {
+	tests := []struct {
+		name         string
+		title        string
+		performer    string
+		encoder      encoding.Encoding
+		wantCyrillic bool
+	}{
+		{
+			name:         "Short Cyrillic (Gentlemen) in CP1251",
+			title:        "Джентльмены",
+			performer:    "Меладзе",
+			encoder:      charmap.Windows1251,
+			wantCyrillic: true,
+		},
+		{
+			name:         "Short Cyrillic in KOI8-R",
+			title:        "Звезда по имени Солнце",
+			performer:    "Кино",
+			encoder:      charmap.KOI8R,
+			wantCyrillic: true,
+		},
+		{
+			name:         "ALL CAPS Cyrillic in KOI8-R",
+			title:        "ЗВЕЗДА ПО ИМЕНИ СОЛНЦЕ",
+			performer:    "КИНО",
+			encoder:      charmap.KOI8R,
+			wantCyrillic: true,
+		},
+		{
+			name:      "Western European in Windows-1252",
+			title:     "Die Schöne Müllerin",
+			performer: "Franz Schubert",
+			encoder:   charmap.Windows1252,
+		},
+		{
+			name:      "French in Windows-1252",
+			title:     "La Vie en rose",
+			performer: "Édith Piaf",
+			encoder:   charmap.Windows1252,
+		},
+		{
+			name:      "Korean in EUC-KR",
+			title:     "봄날",
+			performer: "방탄소년단",
+			encoder:   korean.EUCKR,
+		},
+		{
+			name:      "Chinese in GB18030",
+			title:     "十年",
+			performer: "陈奕迅",
+			encoder:   simplifiedchinese.GB18030,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rawCue := "TITLE \"" + tt.title + "\"\nPERFORMER \"" + tt.performer + "\"\nFILE \"01.flac\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"" + tt.title + "\"\n    INDEX 01 00:00:00"
+			enc := tt.encoder.NewEncoder()
+			encoded, err := enc.Bytes([]byte(rawCue))
+			if err != nil {
+				t.Fatalf("encode failed: %v", err)
+			}
+
+			sheet, err := ParseBytes(encoded)
+			if err != nil {
+				t.Fatalf("ParseBytes failed: %v", err)
+			}
+
+			if sheet.Title != tt.title {
+				t.Errorf("Title = %q, want %q (got mojibake)", sheet.Title, tt.title)
+			}
+			if sheet.Performer != tt.performer {
+				t.Errorf("Performer = %q, want %q", sheet.Performer, tt.performer)
+			}
+		})
+	}
+}
+
+func TestParseBytes_DirectUTF16(t *testing.T) {
+	// Directly test ParseBytes with raw UTF-16LE including surrogate pair (musical G clef 𝄞 U+1D11E)
+	cueText := "TITLE \"Clef 𝄞 Symphony\"\nPERFORMER \"Artist\"\nFILE \"a.flac\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"T1\"\n    INDEX 01 00:00:00"
+	var buf bytes.Buffer
+	buf.Write([]byte{0xff, 0xfe}) // UTF-16LE BOM
+
+	for _, r := range cueText {
+		if r > 0xFFFF {
+			// Encode surrogate pair
+			r -= 0x10000
+			high := uint16(0xD800 + (r >> 10))
+			low := uint16(0xDC00 + (r & 0x3FF))
+			buf.WriteByte(byte(high))
+			buf.WriteByte(byte(high >> 8))
+			buf.WriteByte(byte(low))
+			buf.WriteByte(byte(low >> 8))
+		} else {
+			buf.WriteByte(byte(r))
+			buf.WriteByte(byte(r >> 8))
+		}
+	}
+
+	sheet, err := ParseBytes(buf.Bytes())
+	if err != nil {
+		t.Fatalf("ParseBytes with UTF-16 failed: %v", err)
+	}
+	if sheet.Title != "Clef 𝄞 Symphony" {
+		t.Errorf("Title = %q, want %q", sheet.Title, "Clef 𝄞 Symphony")
+	}
+}

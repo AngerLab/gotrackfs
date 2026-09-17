@@ -1,0 +1,80 @@
+package main
+
+import (
+	"flag"
+	"fmt"
+	"log"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+
+	"gotrackfs/internal/vfs"
+
+	"github.com/winfsp/cgofuse/fuse"
+)
+
+func main() {
+	var (
+		debug     bool
+		keepAlbum bool
+	)
+	flag.BoolVar(&debug, "debug", false, "Enable FUSE debug logging")
+	flag.BoolVar(&keepAlbum, "keep-album", false, "Keep monolithic audio file visible alongside virtual tracks")
+	flag.Parse()
+
+	args := flag.Args()
+	sourceDir := "SOURCE"
+	mountPoint := "VIRTUAL"
+
+	if len(args) >= 1 {
+		sourceDir = args[0]
+	}
+	if len(args) >= 2 {
+		mountPoint = args[1]
+	}
+
+	absSource, err := filepath.Abs(sourceDir)
+	if err != nil {
+		log.Fatalf("resolve source dir: %v", err)
+	}
+
+	absMount, err := filepath.Abs(mountPoint)
+	if err != nil {
+		log.Fatalf("resolve mount point: %v", err)
+	}
+
+	if _, err := os.Stat(absSource); os.IsNotExist(err) {
+		log.Fatalf("source directory does not exist: %s", absSource)
+	}
+	if _, err := os.Stat(absMount); os.IsNotExist(err) {
+		log.Fatalf("mount point directory does not exist: %s", absMount)
+	}
+
+	fs := vfs.New(vfs.Options{
+		SourceRoot: absSource,
+		KeepAlbum:  keepAlbum,
+		Debug:      debug,
+	})
+	host := fuse.NewFileSystemHost(fs)
+
+	var fuseOpts []string
+	if debug {
+		fuseOpts = append(fuseOpts, "-d")
+	}
+
+	// Handle graceful shutdown on Ctrl+C / SIGTERM
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-c
+		fmt.Println("\nUnmounting FUSE filesystem...")
+		host.Unmount()
+	}()
+
+	fmt.Printf("Mounting gotrackfs:\n  Source:      %s\n  Mount Point: %s\nPress Ctrl+C to unmount.\n", absSource, absMount)
+
+	if !host.Mount(absMount, fuseOpts) {
+		log.Fatalf("failed to mount FUSE filesystem at %s", absMount)
+	}
+}

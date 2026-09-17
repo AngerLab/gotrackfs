@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"gotrackfs/internal/cutter"
 	"gotrackfs/internal/vfs"
 
 	"github.com/winfsp/cgofuse/fuse"
@@ -59,11 +60,30 @@ func main() {
 		log.Fatalf("mount point directory does not exist: %s", absMount)
 	}
 
+	// Initialize audio cutter if ffmpeg is available
+	var slicer vfs.TrackSlicer
+	ffmpegCutter, err := cutter.NewFFmpegCutter("", logger)
+	if err != nil {
+		logger.Warn("ffmpeg not found in PATH: audio slicing is disabled (install ffmpeg to enable virtual track playback)", "error", err)
+	} else {
+		cutterMgr, err := cutter.NewManager(cutter.Options{
+			Cutter: ffmpegCutter,
+			Logger: logger,
+		})
+		if err != nil {
+			logger.Warn("failed to initialize audio cache manager: audio slicing is disabled", "error", err)
+		} else {
+			defer cutterMgr.Close()
+			slicer = cutterMgr
+		}
+	}
+
 	fs := vfs.New(vfs.Options{
 		SourceRoot: absSource,
 		KeepAlbum:  keepAlbum,
 		Debug:      debug,
 		Logger:     logger,
+		Slicer:     slicer,
 	})
 	host := fuse.NewFileSystemHost(fs)
 

@@ -5,10 +5,12 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"gotrackfs/internal/cue"
+	"gotrackfs/internal/cutter"
 )
 
 // dirFacts captures file metadata (mtimes and sizes) required for cache validation.
@@ -124,14 +126,50 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger) (*Dir
 				estimatedSize = 1024 * 1024
 			}
 
+			tags := make(map[string]string)
+			if title != "" {
+				tags["title"] = title
+			}
+			if tr.Performer != "" {
+				tags["artist"] = tr.Performer
+			}
+			if sheet.Performer != "" {
+				tags["album_artist"] = sheet.Performer
+			}
+			if sheet.Title != "" {
+				tags["album"] = sheet.Title
+			}
+			if tr.Num > 0 {
+				tags["track"] = strconv.Itoa(tr.Num)
+			}
+			if sheet.Date != "" {
+				tags["date"] = sheet.Date
+			}
+			if sheet.Genre != "" {
+				tags["genre"] = sheet.Genre
+			}
+			if sheet.DiscNumber != "" {
+				tags["disc"] = sheet.DiscNumber
+			}
+			if sheet.Songwriter != "" {
+				tags["composer"] = sheet.Songwriter
+			} else if tr.Songwriter != "" {
+				tags["composer"] = tr.Songwriter
+			}
+
 			album.Tracks[i] = VirtualTrack{
-				Num:             tr.Num,
-				Title:           title,
-				Performer:       tr.Performer,
-				SourceAudioPath: audioPath,
-				Start:           tr.Start,
-				End:             tr.End,
-				EstimatedSize:   estimatedSize,
+				Num:           tr.Num,
+				Title:         title,
+				Performer:     tr.Performer,
+				EstimatedSize: estimatedSize,
+				Request: cutter.TrackRequest{
+					SourceAudioPath: audioPath,
+					SourceModTime:   audioFi.ModTime(),
+					SourceSize:      audioFi.Size(),
+					Start:           tr.Start,
+					End:             tr.End,
+					Tags:            tags,
+				},
 			}
 		}
 
@@ -173,6 +211,14 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger) (*Dir
 		switch ext {
 		case ".jpg", ".jpeg", ".png", ".webp", ".gif", ".pdf":
 			parentArtwork[name] = filepath.Join(dirPath, name)
+		}
+	}
+
+	primaryArtwork := findPrimaryArtwork(parentArtwork)
+	for _, album := range albums {
+		for i := range album.Tracks {
+			album.Tracks[i].Request.ArtworkPath = primaryArtwork
+			album.Tracks[i].CutterKey = album.Tracks[i].Request.Key()
 		}
 	}
 
@@ -260,4 +306,22 @@ func assignTrackFilenames(album *Album, occupiedNames map[string]bool, context s
 		tracksByName[candidateName] = vt
 	}
 	return tracksByName
+}
+
+// findPrimaryArtwork returns the path to the best candidate cover image from available artwork.
+// Only valid raster images (.jpg, .jpeg, .png) are considered for embedding.
+func findPrimaryArtwork(artworks map[string]string) string {
+	for _, preferred := range []string{"cover.jpg", "folder.jpg", "front.jpg", "cover.png", "folder.png"} {
+		if path, ok := artworks[preferred]; ok {
+			return path
+		}
+	}
+	for name, path := range artworks {
+		ext := strings.ToLower(filepath.Ext(name))
+		switch ext {
+		case ".jpg", ".jpeg", ".png":
+			return path
+		}
+	}
+	return ""
 }

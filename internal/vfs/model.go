@@ -1,18 +1,20 @@
 package vfs
 
-import "gotrackfs/internal/cue"
+import (
+	"gotrackfs/internal/cue"
+	"gotrackfs/internal/cutter"
+)
 
 // VirtualTrack represents a single audio track virtualized from a monolithic audio file.
 type VirtualTrack struct {
-	Num       int
-	Title     string
-	Performer string
-	FileName  string // Virtual filename presented in FUSE (e.g. "01. Intro.flac" or "1-01. Hey You.flac")
+	Num           int
+	Title         string
+	Performer     string
+	FileName      string // Virtual filename presented in FUSE (e.g. "01. Intro.flac" or "1-01. Hey You.flac")
+	EstimatedSize int64  // Estimated size in bytes
+	CutterKey     string // Precomputed unique cache key for the slicer
 
-	SourceAudioPath string  // Real path to the monolithic audio file
-	Start           float64 // Start offset in seconds
-	End             float64 // End offset in seconds (0 for last track if total duration unknown)
-	EstimatedSize   int64   // Estimated size in bytes
+	Request       cutter.TrackRequest // Exact audio facts, timing, artwork and metadata for the slicer
 }
 
 // Album represents a parsed album with its virtualized tracks.

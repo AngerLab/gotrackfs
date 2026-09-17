@@ -1,6 +1,7 @@
 package vfs
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"os"
@@ -9,8 +10,18 @@ import (
 	"sync"
 	"syscall"
 
+	"gotrackfs/internal/cutter"
+
 	"github.com/winfsp/cgofuse/fuse"
 )
+
+// TrackSlicer defines the interface needed by VFS to slice and acquire tracks on-demand.
+type TrackSlicer interface {
+	Acquire(ctx context.Context, key string, req cutter.TrackRequest) (string, error)
+	Release(key string)
+	GetExisting(key string) (int64, bool)
+	Close() error
+}
 
 // Options holds configuration options for the VFS filesystem.
 type Options struct {
@@ -18,6 +29,12 @@ type Options struct {
 	KeepAlbum  bool         // If true, keep monolithic audio files visible alongside virtual tracks
 	Debug      bool         // If true, enables verbose debug logging
 	Logger     *slog.Logger // Optional structured logger. If nil, a default text logger is used with level based on Debug.
+	Slicer     TrackSlicer  // Optional audio slicer implementation. If nil, virtual track playback is disabled (Open returns ENOSYS).
+}
+
+type fileHandle struct {
+	file      *os.File
+	cutterKey string // non-empty if acquired via cutter
 }
 
 // VFS implements fuse.FileSystemInterface using a path-based routing model.
@@ -27,9 +44,10 @@ type VFS struct {
 	keepAlbum  bool
 	logger     *slog.Logger
 	cache      *AlbumCache
+	slicer     TrackSlicer
 
 	mu         sync.Mutex
-	openFiles  map[uint64]*os.File
+	openFiles  map[uint64]*fileHandle
 	nextHandle uint64
 }
 
@@ -54,7 +72,8 @@ func New(opts Options) *VFS {
 		keepAlbum:  opts.KeepAlbum,
 		logger:     logger,
 		cache:      NewAlbumCache(logger),
-		openFiles:  make(map[uint64]*os.File),
+		slicer:     opts.Slicer,
+		openFiles:  make(map[uint64]*fileHandle),
 	}
 }
 
@@ -195,12 +214,18 @@ func (v *VFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 	if node.track != nil {
 		// Virtual track entry
 		var st syscall.Stat_t
-		if err := syscall.Lstat(node.track.SourceAudioPath, &st); err != nil {
+		if err := syscall.Lstat(node.track.Request.SourceAudioPath, &st); err != nil {
 			return -fuse.ENOENT
 		}
 
 		copyStat(stat, &st)
-		stat.Size = node.track.EstimatedSize
+		size := node.track.EstimatedSize
+		if v.slicer != nil {
+			if exactSize, ok := v.slicer.GetExisting(node.track.CutterKey); ok {
+				size = exactSize
+			}
+		}
+		stat.Size = size
 		stat.Mode = syscall.S_IFREG | 0444
 		return 0
 	}
@@ -337,8 +362,31 @@ func (v *VFS) Open(path string, flags int) (int, uint64) {
 		return -fuse.EISDIR, ^uint64(0)
 	}
 	if node.track != nil {
-		// Slicing not implemented yet
-		return -fuse.ENOSYS, ^uint64(0)
+		if v.slicer == nil {
+			v.logger.Warn("vfs: cannot slice audio track: no audio slicer configured (is ffmpeg installed?)", "track", node.track.FileName)
+			return -fuse.ENOSYS, ^uint64(0)
+		}
+
+		key := node.track.CutterKey
+		tempPath, err := v.slicer.Acquire(context.Background(), key, node.track.Request)
+		if err != nil {
+			v.logger.Error("vfs: failed to slice audio track", "track", node.track.FileName, "error", err)
+			return -fuse.EIO, ^uint64(0)
+		}
+
+		f, err := os.Open(tempPath)
+		if err != nil {
+			v.slicer.Release(key)
+			return -fuse.EIO, ^uint64(0)
+		}
+
+		v.mu.Lock()
+		v.nextHandle++
+		fh := v.nextHandle
+		v.openFiles[fh] = &fileHandle{file: f, cutterKey: key}
+		v.mu.Unlock()
+
+		return 0, fh
 	}
 
 	f, err := os.Open(node.realPath)
@@ -355,25 +403,24 @@ func (v *VFS) Open(path string, flags int) (int, uint64) {
 	}
 
 	v.mu.Lock()
-	defer v.mu.Unlock()
-
 	v.nextHandle++
 	fh := v.nextHandle
-	v.openFiles[fh] = f
+	v.openFiles[fh] = &fileHandle{file: f}
+	v.mu.Unlock()
 
 	return 0, fh
 }
 
 func (v *VFS) Read(path string, buff []byte, ofst int64, fh uint64) int {
 	v.mu.Lock()
-	f, ok := v.openFiles[fh]
+	h, ok := v.openFiles[fh]
 	v.mu.Unlock()
 
 	if !ok {
 		return -fuse.EBADF
 	}
 
-	n, err := f.ReadAt(buff, ofst)
+	n, err := h.file.ReadAt(buff, ofst)
 	if err != nil && err != io.EOF {
 		return -fuse.EIO
 	}
@@ -387,15 +434,24 @@ func (v *VFS) Flush(path string, fh uint64) int {
 
 func (v *VFS) Release(path string, fh uint64) int {
 	v.mu.Lock()
-	f, ok := v.openFiles[fh]
+	h, ok := v.openFiles[fh]
 	if ok {
 		delete(v.openFiles, fh)
 	}
 	v.mu.Unlock()
 
-	if ok && f != nil {
-		_ = f.Close()
+	if ok && h != nil {
+		_ = h.file.Close()
+		if h.cutterKey != "" && v.slicer != nil {
+			v.slicer.Release(h.cutterKey)
+		}
 	}
 
 	return 0
+}
+
+func (v *VFS) Destroy() {
+	if v.slicer != nil {
+		_ = v.slicer.Close()
+	}
 }

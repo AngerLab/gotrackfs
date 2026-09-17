@@ -2,6 +2,7 @@ package vfs
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -9,6 +10,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"gotrackfs/internal/cutter"
 
 	"github.com/winfsp/cgofuse/fuse"
 )
@@ -638,5 +641,119 @@ FILE "01. Intro.flac" WAVE
 		t.Errorf("expected ENOENT for hidden monolith, got %d", code)
 	}
 }
+
+type testMockCutter struct {
+	cutCount int
+	lastReq  cutter.TrackRequest
+}
+
+func (m *testMockCutter) Cut(ctx context.Context, req cutter.TrackRequest, outputPath string) error {
+	m.cutCount++
+	m.lastReq = req
+	return os.WriteFile(outputPath, []byte("REAL_SLICED_AUDIO_BYTES_FROM_CUTTER"), 0644)
+}
+
+func TestVFS_AudioSlicingWithCutter(t *testing.T) {
+	tmpDir := t.TempDir()
+	albumDir := filepath.Join(tmpDir, "TestAlbum")
+	if err := os.MkdirAll(albumDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cueContent := `TITLE "Test Album"
+PERFORMER "Test Artist"
+FILE "audio.flac" WAVE
+  TRACK 01 AUDIO
+    TITLE "First Track"
+    INDEX 01 00:00:00
+  TRACK 02 AUDIO
+    TITLE "Second Track"
+    INDEX 01 02:00:00`
+
+	if err := os.WriteFile(filepath.Join(albumDir, "album.cue"), []byte(cueContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(albumDir, "audio.flac"), make([]byte, 1024*1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(albumDir, "cover.jpg"), []byte("COVER_ART"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mock := &testMockCutter{}
+	cutterMgr, err := cutter.NewManager(cutter.Options{
+		Cutter: mock,
+		TTL:    1 * time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	v := New(Options{
+		SourceRoot: tmpDir,
+		Slicer:     cutterMgr,
+	})
+	defer v.Destroy()
+
+	// 1. Initial Getattr reports estimated size
+	var st fuse.Stat_t
+	code := v.Getattr("/TestAlbum/01. First Track.flac", &st, 0)
+	if code != 0 {
+		t.Fatalf("Getattr before slice failed: %d", code)
+	}
+	if st.Size <= 0 {
+		t.Errorf("expected positive estimated size, got %d", st.Size)
+	}
+
+	// 2. Open virtual track - triggers slice via cutter
+	openCode, fh := v.Open("/TestAlbum/01. First Track.flac", fuse.O_RDONLY)
+	if openCode != 0 {
+		t.Fatalf("Open virtual track failed: %d", openCode)
+	}
+
+	if mock.cutCount != 1 {
+		t.Fatalf("expected cutter to be called 1 time, got %d", mock.cutCount)
+	}
+	if mock.lastReq.Tag("title") != "First Track" {
+		t.Errorf("expected Title 'First Track', got %q", mock.lastReq.Tag("title"))
+	}
+	if mock.lastReq.Tag("album") != "Test Album" {
+		t.Errorf("expected Album 'Test Album', got %q", mock.lastReq.Tag("album"))
+	}
+	if mock.lastReq.ArtworkPath != filepath.Join(albumDir, "cover.jpg") {
+		t.Errorf("expected ArtworkPath to cover.jpg, got %q", mock.lastReq.ArtworkPath)
+	}
+
+	// 3. Read reads sliced audio data
+	buf := make([]byte, 100)
+	n := v.Read("/TestAlbum/01. First Track.flac", buf, 0, fh)
+	expectedData := "REAL_SLICED_AUDIO_BYTES_FROM_CUTTER"
+	if n != len(expectedData) || string(buf[:n]) != expectedData {
+		t.Errorf("expected %q, got %q", expectedData, string(buf[:n]))
+	}
+
+	// 4. Getattr now reports exact size of sliced file!
+	code = v.Getattr("/TestAlbum/01. First Track.flac", &st, 0)
+	if code != 0 {
+		t.Fatalf("Getattr after slice failed: %d", code)
+	}
+	if st.Size != int64(len(expectedData)) {
+		t.Errorf("expected exact size %d, got %d", len(expectedData), st.Size)
+	}
+
+	// 5. Concurrent open of the same track reuses existing cache (cutter not called again)
+	openCode2, fh2 := v.Open("/TestAlbum/01. First Track.flac", fuse.O_RDONLY)
+	if openCode2 != 0 {
+		t.Fatalf("second Open failed: %d", openCode2)
+	}
+	if mock.cutCount != 1 {
+		t.Errorf("expected cutCount to remain 1, got %d", mock.cutCount)
+	}
+
+	// Release both handles
+	v.Release("/TestAlbum/01. First Track.flac", fh)
+	v.Release("/TestAlbum/01. First Track.flac", fh2)
+}
+
 
 

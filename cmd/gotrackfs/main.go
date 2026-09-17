@@ -18,11 +18,13 @@ import (
 
 func main() {
 	var (
-		debug     bool
-		keepAlbum bool
+		debug      bool
+		keepAlbum  bool
+		allowOther bool
 	)
 	flag.BoolVar(&debug, "debug", false, "Enable FUSE and VFS debug logging")
 	flag.BoolVar(&keepAlbum, "keep-album", false, "Keep monolithic audio file visible alongside virtual tracks")
+	flag.BoolVar(&allowOther, "allow-other", false, "Allow other users to access the mount (requires user_allow_other in /etc/fuse.conf)")
 	flag.Parse()
 
 	logLevel := slog.LevelInfo
@@ -90,6 +92,9 @@ func main() {
 	var fuseOpts []string
 	if debug {
 		fuseOpts = append(fuseOpts, "-d")
+	}
+	if allowOther {
+		fuseOpts = append(fuseOpts, "-o", "allow_other")
 	}
 
 	// Handle graceful shutdown on Ctrl+C / SIGTERM

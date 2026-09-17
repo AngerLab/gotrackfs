@@ -1,0 +1,12 @@
+.playground/
+testdata/
+.git/
+.github/
+dist/
+*.md
+*.cue
+Makefile
+LICENSE
+README.md
+.dockerignore
+Dockerfile

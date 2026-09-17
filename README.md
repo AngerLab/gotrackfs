@@ -56,17 +56,16 @@ git clone https://github.com/AngerLab/gotrackfs && cd gotrackfs && make install
 
 ```sh
 gotrackfs [options] SOURCE VIRTUAL
-```
 
-```sh
 # Mount ~/Music as a virtual library in ./VIRTUAL
 gotrackfs ~/Music ./VIRTUAL
 ```
 
 | Flag | Description |
 |------|-------------|
-| `-debug` | Verbose FUSE and VFS logging |
+| `-debug` | Verbose FUSE and VFS debug logging |
 | `-keep-album` | Keep monolithic audio files visible next to virtual tracks |
+| `-allow-other` | Allow other users to access the mount (requires `user_allow_other` in `/etc/fuse.conf`) |
 
 Unmount with `Ctrl+C` (graceful SIGINT/SIGTERM handling included).
 
@@ -75,6 +74,30 @@ Linux, if you need to do it by hand:
 ```sh
 fusermount3 -u VIRTUAL
 ```
+
+## Docker
+
+On any Linux system with Docker and FUSE, no local installation is needed:
+
+```sh
+docker run --rm \
+    --name=gotrackfs \
+    --device /dev/fuse \
+    --cap-add SYS_ADMIN \
+    --security-opt apparmor:unconfined \
+    -v /path/to/yourmusiclibrary:/src:ro \
+    -v /path/to/yourmountpoint:/dst:rshared \
+    ghcr.io/angerlab/gotrackfs
+```
+
+- `-v .../library:/src:ro` — your music library, mounted read-only
+- `-v .../mountpoint:/dst:rshared` — the virtual track library, visible on the host
+- `--device /dev/fuse --cap-add SYS_ADMIN` — privileges required to mount FUSE
+- ffmpeg is bundled in the image; tracks are sliced on demand inside the container
+
+The container mounts with `allow_other` automatically, so the mounted content is
+visible to your regular host user. Extra flags go after the image name,
+e.g. `... gotrackfs -keep-album`.
 
 ## How it works
 

@@ -1,5 +1,4 @@
 BIN      := gotrackfs
-MODULE   := github.com/AngerLab/gotrackfs
 
 # cgofuse builds against libfuse2 by default; use libfuse3 on Linux
 ifeq ($(shell uname),Linux)

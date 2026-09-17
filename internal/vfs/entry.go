@@ -16,7 +16,7 @@ type VirtualTrack struct {
 	Num       int
 	Title     string
 	Performer string
-	FileName  string // Virtual filename presented in FUSE (e.g. "01. Intro.flac")
+	FileName  string // Virtual filename presented in FUSE (e.g. "01. Intro.flac" or "1-01. Hey You.flac")
 
 	SourceAudioPath string  // Real path to the monolithic audio file
 	Start           float64 // Start offset in seconds
@@ -30,215 +30,269 @@ type Album struct {
 	SourceAudioPath string
 	Sheet           *cue.Sheet
 	Tracks          []VirtualTrack
+}
+
+// DirState holds the virtualized state of a single directory,
+// which can contain 0, 1, or multiple albums (e.g. CD1 + CD2).
+type DirState struct {
+	Albums          []*Album
 	TracksByName    map[string]*VirtualTrack
+	HiddenMonoliths map[string]bool // Basenames of monolithic files to hide
 }
 
-// AlbumCache caches parsed album metadata to prevent re-parsing on every FUSE call.
+// AlbumCache caches parsed directory states to prevent re-parsing on every FUSE call.
 type AlbumCache struct {
-	mu     sync.RWMutex
-	albums map[string]*cachedAlbum // key: directory path
+	mu   sync.RWMutex
+	dirs map[string]*cachedDir
 }
 
-type cachedAlbum struct {
-	cueModTime time.Time
-	cueSize    int64
-	album      *Album // nil if directory has no monolithic CUE
+type cachedDir struct {
+	cueModTimes map[string]time.Time // cuePath -> modTime
+	cueSizes    map[string]int64     // cuePath -> size
+	state       *DirState
 }
 
 func NewAlbumCache() *AlbumCache {
 	return &AlbumCache{
-		albums: make(map[string]*cachedAlbum),
+		dirs: make(map[string]*cachedDir),
 	}
 }
 
-// GetAlbum returns the cached Album for dirPath, or parses it if needed.
-func (c *AlbumCache) GetAlbum(dirPath string) (*Album, error) {
+// GetDirState returns the DirState for dirPath, or parses it if needed.
+func (c *AlbumCache) GetDirState(dirPath string) (*DirState, error) {
+	// Find all .cue files in this directory
+	cueFiles, err := findAllCueFiles(dirPath)
+	if err != nil || len(cueFiles) == 0 {
+		return nil, nil
+	}
+
+	// Read current mtimes and sizes of all .cue files
+	currentModTimes := make(map[string]time.Time, len(cueFiles))
+	currentSizes := make(map[string]int64, len(cueFiles))
+	for _, cp := range cueFiles {
+		fi, err := os.Stat(cp)
+		if err != nil {
+			return nil, err
+		}
+		currentModTimes[cp] = fi.ModTime()
+		currentSizes[cp] = fi.Size()
+	}
+
 	c.mu.RLock()
-	cached, ok := c.albums[dirPath]
+	cached, ok := c.dirs[dirPath]
 	c.mu.RUnlock()
 
-	// Find any .cue file in this directory
-	cuePath, err := findCueFile(dirPath)
-	if err != nil || cuePath == "" {
-		c.mu.Lock()
-		c.albums[dirPath] = &cachedAlbum{}
-		c.mu.Unlock()
-		return nil, nil
+	if ok && cached != nil && isCacheValid(cached, currentModTimes, currentSizes) {
+		return cached.state, nil
 	}
 
-	fi, err := os.Stat(cuePath)
-	if err != nil {
-		return nil, err
-	}
+	// Parse all CUE files and build DirState
+	var albums []*Album
+	claimedAudios := make(map[string]bool)
 
-	if ok && cached != nil && cached.cueModTime.Equal(fi.ModTime()) && cached.cueSize == fi.Size() {
-		return cached.album, nil
-	}
-
-	// Parse CUE file
-	sheet, err := cue.ParseFile(cuePath)
-	if err != nil {
-		c.mu.Lock()
-		c.albums[dirPath] = &cachedAlbum{cueModTime: fi.ModTime(), cueSize: fi.Size(), album: nil}
-		c.mu.Unlock()
-		return nil, fmt.Errorf("parse cue %s: %w", cuePath, err)
-	}
-
-	// Check if this is a monolithic album (or has tracks)
-	tracks := sheet.AllTracks()
-	if len(tracks) == 0 {
-		c.mu.Lock()
-		c.albums[dirPath] = &cachedAlbum{cueModTime: fi.ModTime(), cueSize: fi.Size(), album: nil}
-		c.mu.Unlock()
-		return nil, nil
-	}
-
-	// If CUE references multiple audio files (already split per-track), don't virtualize
-	if len(sheet.Files) > 1 {
-		c.mu.Lock()
-		c.albums[dirPath] = &cachedAlbum{cueModTime: fi.ModTime(), cueSize: fi.Size(), album: nil}
-		c.mu.Unlock()
-		return nil, nil
-	}
-
-	// Resolve the real monolithic audio file
-	declaredFile := ""
-	if len(sheet.Files) == 1 {
-		declaredFile = sheet.Files[0].Name
-	}
-	audioPath := resolveAudioFile(dirPath, cuePath, declaredFile)
-	if audioPath == "" {
-		// Audio file not found
-		c.mu.Lock()
-		c.albums[dirPath] = &cachedAlbum{cueModTime: fi.ModTime(), cueSize: fi.Size(), album: nil}
-		c.mu.Unlock()
-		return nil, nil
-	}
-
-	audioFi, err := os.Stat(audioPath)
-	if err != nil {
-		return nil, err
-	}
-	totalAudioSize := audioFi.Size()
-
-	// Build VirtualTracks
-	album := &Album{
-		CuePath:         cuePath,
-		SourceAudioPath: audioPath,
-		Sheet:           sheet,
-		Tracks:          make([]VirtualTrack, len(tracks)),
-		TracksByName:    make(map[string]*VirtualTrack),
-	}
-
-	ext := filepath.Ext(audioPath)
-	if ext == "" {
-		ext = ".flac"
-	}
-
-	// Calculate rough sizes
-	totalKnownDuration := 0.0
-	for _, tr := range tracks {
-		if tr.End > tr.Start {
-			totalKnownDuration += (tr.End - tr.Start)
-		}
-	}
-
-	for i, tr := range tracks {
-		title := tr.Title
-		if title == "" {
-			title = fmt.Sprintf("Track %02d", tr.Num)
+	for _, cuePath := range cueFiles {
+		sheet, err := cue.ParseFile(cuePath)
+		if err != nil {
+			continue
 		}
 
-		vName := formatTrackFilename(tr.Num, tr.Performer, sheet.Performer, title, ext)
-
-		// Estimate size
-		estimatedSize := int64(0)
-		if tr.End > tr.Start && totalKnownDuration > 0 {
-			duration := tr.End - tr.Start
-			estimatedSize = int64(float64(totalAudioSize) * (duration / totalKnownDuration))
-		} else {
-			// Fallback: equal division
-			estimatedSize = totalAudioSize / int64(len(tracks))
-		}
-		if estimatedSize <= 0 {
-			estimatedSize = 1024 * 1024 // 1MB minimum fallback
+		tracks := sheet.AllTracks()
+		if len(tracks) == 0 {
+			continue
 		}
 
-		vt := VirtualTrack{
-			Num:             tr.Num,
-			Title:           title,
-			Performer:       tr.Performer,
-			FileName:        vName,
+		// Multi-file CUEs (already split per track) are left untouched
+		if len(sheet.Files) > 1 {
+			continue
+		}
+
+		declaredFile := ""
+		if len(sheet.Files) == 1 {
+			declaredFile = sheet.Files[0].Name
+		}
+
+		audioPath := resolveAudioFileForCue(dirPath, cuePath, declaredFile, claimedAudios)
+		if audioPath == "" {
+			continue
+		}
+
+		audioFi, err := os.Stat(audioPath)
+		if err != nil {
+			continue
+		}
+		claimedAudios[audioPath] = true
+
+		album := &Album{
+			CuePath:         cuePath,
 			SourceAudioPath: audioPath,
-			Start:           tr.Start,
-			End:             tr.End,
-			EstimatedSize:   estimatedSize,
+			Sheet:           sheet,
+			Tracks:          make([]VirtualTrack, len(tracks)),
 		}
 
-		album.Tracks[i] = vt
-		album.TracksByName[vName] = &album.Tracks[i]
+		totalAudioSize := audioFi.Size()
+		ext := filepath.Ext(audioPath)
+		if ext == "" {
+			ext = ".flac"
+		}
+
+		totalKnownDuration := 0.0
+		for _, tr := range tracks {
+			if tr.End > tr.Start {
+				totalKnownDuration += (tr.End - tr.Start)
+			}
+		}
+
+		for i, tr := range tracks {
+			title := tr.Title
+			if title == "" {
+				title = fmt.Sprintf("Track %02d", tr.Num)
+			}
+
+			estimatedSize := int64(0)
+			if tr.End > tr.Start && totalKnownDuration > 0 {
+				duration := tr.End - tr.Start
+				estimatedSize = int64(float64(totalAudioSize) * (duration / totalKnownDuration))
+			} else {
+				estimatedSize = totalAudioSize / int64(len(tracks))
+			}
+			if estimatedSize <= 0 {
+				estimatedSize = 1024 * 1024
+			}
+
+			album.Tracks[i] = VirtualTrack{
+				Num:             tr.Num,
+				Title:           title,
+				Performer:       tr.Performer,
+				SourceAudioPath: audioPath,
+				Start:           tr.Start,
+				End:             tr.End,
+				EstimatedSize:   estimatedSize,
+			}
+		}
+
+		albums = append(albums, album)
+	}
+
+	if len(albums) == 0 {
+		c.mu.Lock()
+		c.dirs[dirPath] = &cachedDir{
+			cueModTimes: currentModTimes,
+			cueSizes:    currentSizes,
+			state:       nil,
+		}
+		c.mu.Unlock()
+		return nil, nil
+	}
+
+	dirState := &DirState{
+		Albums:          albums,
+		TracksByName:    make(map[string]*VirtualTrack),
+		HiddenMonoliths: make(map[string]bool),
+	}
+
+	// TODO: Support virtual subdirectories mode (e.g. via --split-discs flag).
+	// When enabled for multi-album folders (len(albums) > 1), instead of flattening
+	// with disc prefixes (1-01..., 2-01...), generate virtual subdirectories (CD1/, CD2/)
+	// and mirror cover.jpg into each.
+	isMultiAlbum := len(albums) > 1
+
+	for albumIdx, album := range albums {
+		dirState.HiddenMonoliths[filepath.Base(album.SourceAudioPath)] = true
+
+		discPrefix := ""
+		if isMultiAlbum {
+			discPrefix = determineDiscPrefix(album, albumIdx+1)
+		}
+
+		ext := filepath.Ext(album.SourceAudioPath)
+		if ext == "" {
+			ext = ".flac"
+		}
+
+		for i := range album.Tracks {
+			vt := &album.Tracks[i]
+			vt.FileName = formatTrackFilename(vt.Num, vt.Performer, album.Sheet.Performer, vt.Title, discPrefix, ext)
+			dirState.TracksByName[vt.FileName] = vt
+		}
 	}
 
 	c.mu.Lock()
-	c.albums[dirPath] = &cachedAlbum{
-		cueModTime: fi.ModTime(),
-		cueSize:    fi.Size(),
-		album:      album,
+	c.dirs[dirPath] = &cachedDir{
+		cueModTimes: currentModTimes,
+		cueSizes:    currentSizes,
+		state:       dirState,
 	}
 	c.mu.Unlock()
 
-	return album, nil
+	return dirState, nil
 }
 
-func findCueFile(dir string) (string, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return "", err
+func isCacheValid(cached *cachedDir, currentModTimes map[string]time.Time, currentSizes map[string]int64) bool {
+	if len(cached.cueModTimes) != len(currentModTimes) {
+		return false
 	}
-	for _, entry := range entries {
-		if !entry.IsDir() && strings.EqualFold(filepath.Ext(entry.Name()), ".cue") {
-			return filepath.Join(dir, entry.Name()), nil
+	for cp, mtime := range currentModTimes {
+		oldMtime, ok := cached.cueModTimes[cp]
+		if !ok || !oldMtime.Equal(mtime) {
+			return false
+		}
+		if cached.cueSizes[cp] != currentSizes[cp] {
+			return false
 		}
 	}
-	return "", nil
+	return true
 }
 
-func resolveAudioFile(dir, cuePath, declaredName string) string {
+func findAllCueFiles(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var cueFiles []string
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.EqualFold(filepath.Ext(entry.Name()), ".cue") {
+			cueFiles = append(cueFiles, filepath.Join(dir, entry.Name()))
+		}
+	}
+	return cueFiles, nil
+}
+
+func resolveAudioFileForCue(dir, cuePath, declaredName string, claimed map[string]bool) string {
 	// 1. Declared name in CUE
 	if declaredName != "" {
 		p := filepath.Join(dir, declaredName)
-		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && !claimed[p] {
 			return p
 		}
 		p = filepath.Join(dir, filepath.Base(declaredName))
-		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && !claimed[p] {
 			return p
 		}
 
-		// Try same stem with audio extensions
+		// Stem + audio extensions
 		stem := strings.TrimSuffix(filepath.Base(declaredName), filepath.Ext(declaredName))
 		for _, ext := range []string{".flac", ".wav", ".ape", ".wv", ".m4a", ".mp3", ".FLAC", ".WAV"} {
 			cand := filepath.Join(dir, stem+ext)
-			if fi, err := os.Stat(cand); err == nil && !fi.IsDir() {
+			if fi, err := os.Stat(cand); err == nil && !fi.IsDir() && !claimed[cand] {
 				return cand
 			}
 		}
 	}
 
-	// 2. Same basename as CUE file
+	// 2. Same stem as CUE file
 	cueBase := filepath.Base(cuePath)
 	cueStem := strings.TrimSuffix(cueBase, filepath.Ext(cueBase))
 	for _, ext := range []string{".flac", ".wav", ".ape", ".wv", ".m4a", ".mp3", ".FLAC", ".WAV"} {
 		cand := filepath.Join(dir, cueStem+ext)
-		if fi, err := os.Stat(cand); err == nil && !fi.IsDir() {
+		if fi, err := os.Stat(cand); err == nil && !fi.IsDir() && !claimed[cand] {
 			return cand
 		}
 	}
 
-	// 3. Look for any audio file in directory if only 1 exists
+	// 3. If only one unclaimed audio file exists in directory
 	entries, err := os.ReadDir(dir)
 	if err == nil {
-		var audioCandidates []string
+		var unclaimed []string
 		for _, e := range entries {
 			if e.IsDir() {
 				continue
@@ -246,27 +300,51 @@ func resolveAudioFile(dir, cuePath, declaredName string) string {
 			ext := strings.ToLower(filepath.Ext(e.Name()))
 			switch ext {
 			case ".flac", ".wav", ".ape", ".wv", ".m4a", ".mp3":
-				audioCandidates = append(audioCandidates, filepath.Join(dir, e.Name()))
+				cand := filepath.Join(dir, e.Name())
+				if !claimed[cand] {
+					unclaimed = append(unclaimed, cand)
+				}
 			}
 		}
-		if len(audioCandidates) == 1 {
-			return audioCandidates[0]
+		if len(unclaimed) == 1 {
+			return unclaimed[0]
 		}
 	}
 
 	return ""
 }
 
-func formatTrackFilename(num int, trackArtist, albumArtist, title, ext string) string {
-	cleanTitle := sanitizeFilename(title)
-
-	// If track artist differs from album artist, format as: "01. Artist - Title.flac"
-	if trackArtist != "" && albumArtist != "" && !strings.EqualFold(trackArtist, albumArtist) {
-		cleanArtist := sanitizeFilename(trackArtist)
-		return fmt.Sprintf("%02d. %s - %s%s", num, cleanArtist, cleanTitle, ext)
+func determineDiscPrefix(album *Album, defaultDiscNum int) string {
+	if album.Sheet.DiscNumber != "" {
+		return strings.TrimSpace(album.Sheet.DiscNumber) + "-"
 	}
 
-	return fmt.Sprintf("%02d. %s%s", num, cleanTitle, ext)
+	// Try extracting from cue filename (e.g. "CD1.cue" -> "1-", "Disc 2.cue" -> "2-")
+	cueStem := strings.TrimSuffix(filepath.Base(album.CuePath), filepath.Ext(album.CuePath))
+	cueStemLower := strings.ToLower(cueStem)
+	for _, prefix := range []string{"cd", "disc", "disk"} {
+		if strings.HasPrefix(cueStemLower, prefix) {
+			trimmed := strings.TrimSpace(cueStem[len(prefix):])
+			trimmed = strings.TrimLeft(trimmed, "_- ")
+			if trimmed != "" {
+				return trimmed + "-"
+			}
+		}
+	}
+
+	return fmt.Sprintf("%d-", defaultDiscNum)
+}
+
+func formatTrackFilename(num int, trackArtist, albumArtist, title, discPrefix, ext string) string {
+	cleanTitle := sanitizeFilename(title)
+
+	// If track artist differs from album artist, format as: "[discPrefix]01. Artist - Title.flac"
+	if trackArtist != "" && albumArtist != "" && !strings.EqualFold(trackArtist, albumArtist) {
+		cleanArtist := sanitizeFilename(trackArtist)
+		return fmt.Sprintf("%s%02d. %s - %s%s", discPrefix, num, cleanArtist, cleanTitle, ext)
+	}
+
+	return fmt.Sprintf("%s%02d. %s%s", discPrefix, num, cleanTitle, ext)
 }
 
 func sanitizeFilename(s string) string {

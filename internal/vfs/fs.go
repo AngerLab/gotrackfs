@@ -44,20 +44,21 @@ func New(opts Options) *VFS {
 	}
 }
 
+func (v *VFS) isHidden(dir, base string) bool {
+	if v.keepAlbum {
+		return false
+	}
+	realDir := filepath.Join(v.sourceRoot, dir)
+	dirState, _ := v.cache.GetDirState(realDir)
+	return dirState != nil && dirState.HiddenMonoliths[base]
+}
+
 func (v *VFS) Statfs(path string, stat *fuse.Statfs_t) int {
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(v.sourceRoot, &st); err != nil {
 		return -fuse.ENOENT
 	}
-	stat.Bsize = uint64(st.Bsize)
-	stat.Frsize = 1
-	stat.Blocks = uint64(st.Blocks)
-	stat.Bfree = uint64(st.Bfree)
-	stat.Bavail = uint64(st.Bavail)
-	stat.Files = uint64(st.Files)
-	stat.Ffree = uint64(st.Ffree)
-	stat.Favail = uint64(st.Ffree)
-	stat.Namemax = 255
+	fillStatfs(stat, &st)
 	return 0
 }
 
@@ -69,15 +70,19 @@ func (v *VFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 
 	dir := filepath.Dir(cleanPath)
 	base := filepath.Base(cleanPath)
-	realDir := filepath.Join(v.sourceRoot, dir)
 
-	// Check if this path references a virtual track in an album directory
-	album, _ := v.cache.GetAlbum(realDir)
-	if album != nil {
-		if vt, ok := album.TracksByName[base]; ok {
+	// If this is one of the hidden monolithic audio files, return ENOENT
+	if v.isHidden(dir, base) {
+		return -fuse.ENOENT
+	}
+
+	realDir := filepath.Join(v.sourceRoot, dir)
+	dirState, _ := v.cache.GetDirState(realDir)
+	if dirState != nil {
+		if vt, ok := dirState.TracksByName[base]; ok {
 			// Virtual track entry
 			var st syscall.Stat_t
-			if err := syscall.Lstat(album.SourceAudioPath, &st); err != nil {
+			if err := syscall.Lstat(vt.SourceAudioPath, &st); err != nil {
 				return -fuse.ENOENT
 			}
 
@@ -85,11 +90,6 @@ func (v *VFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 			stat.Size = vt.EstimatedSize
 			stat.Mode = syscall.S_IFREG | 0444
 			return 0
-		}
-
-		// If this is the monolithic source audio and keepAlbum is false, hide it
-		if !v.keepAlbum && filepath.Clean(album.SourceAudioPath) == filepath.Join(realDir, base) {
-			return -fuse.ENOENT
 		}
 	}
 
@@ -109,8 +109,14 @@ func (v *VFS) statRealPath(realPath string, stat *fuse.Stat_t) int {
 
 func (v *VFS) Opendir(path string) (int, uint64) {
 	cleanPath := filepath.Clean(path)
-	realDir := filepath.Join(v.sourceRoot, cleanPath)
+	dir := filepath.Dir(cleanPath)
+	base := filepath.Base(cleanPath)
 
+	if v.isHidden(dir, base) {
+		return -fuse.ENOENT, ^uint64(0)
+	}
+
+	realDir := filepath.Join(v.sourceRoot, cleanPath)
 	var st syscall.Stat_t
 	if err := syscall.Lstat(realDir, &st); err != nil {
 		return -fuse.ENOENT, ^uint64(0)
@@ -138,21 +144,21 @@ func (v *VFS) Readdir(path string, fill func(name string, stat *fuse.Stat_t, ofs
 	fill(".", nil, 0)
 	fill("..", nil, 0)
 
-	album, _ := v.cache.GetAlbum(realDir)
-	if album != nil {
-		sourceAudioBase := filepath.Base(album.SourceAudioPath)
-
-		// Emit real entries (excluding the monolithic audio if !keepAlbum)
+	dirState, _ := v.cache.GetDirState(realDir)
+	if dirState != nil {
+		// Emit real entries (excluding the hidden monolithic audio files)
 		for _, e := range entries {
-			if !v.keepAlbum && e.Name() == sourceAudioBase {
+			if !v.keepAlbum && dirState.HiddenMonoliths[e.Name()] {
 				continue
 			}
 			fill(e.Name(), nil, 0)
 		}
 
-		// Emit virtual tracks
-		for _, vt := range album.Tracks {
-			fill(vt.FileName, nil, 0)
+		// Emit virtual tracks across all albums in this directory
+		for _, album := range dirState.Albums {
+			for _, vt := range album.Tracks {
+				fill(vt.FileName, nil, 0)
+			}
 		}
 		return 0
 	}
@@ -174,11 +180,16 @@ func (v *VFS) Open(path string, flags int) (int, uint64) {
 	cleanPath := filepath.Clean(path)
 	dir := filepath.Dir(cleanPath)
 	base := filepath.Base(cleanPath)
-	realDir := filepath.Join(v.sourceRoot, dir)
 
-	album, _ := v.cache.GetAlbum(realDir)
-	if album != nil {
-		if _, ok := album.TracksByName[base]; ok {
+	// Consistent with Getattr: hidden monoliths cannot be opened
+	if v.isHidden(dir, base) {
+		return -fuse.ENOENT, ^uint64(0)
+	}
+
+	realDir := filepath.Join(v.sourceRoot, dir)
+	dirState, _ := v.cache.GetDirState(realDir)
+	if dirState != nil {
+		if _, ok := dirState.TracksByName[base]; ok {
 			// Slicing not implemented yet
 			return -fuse.ENOSYS, ^uint64(0)
 		}
@@ -233,21 +244,4 @@ func (v *VFS) Release(path string, fh uint64) int {
 	}
 
 	return 0
-}
-
-func copyStat(dst *fuse.Stat_t, src *syscall.Stat_t) {
-	dst.Dev = uint64(src.Dev)
-	dst.Ino = uint64(src.Ino)
-	dst.Mode = uint32(src.Mode)
-	dst.Nlink = uint32(src.Nlink)
-	dst.Uid = uint32(src.Uid)
-	dst.Gid = uint32(src.Gid)
-	dst.Rdev = uint64(src.Rdev)
-	dst.Size = int64(src.Size)
-	dst.Atim = fuse.Timespec{Sec: src.Atimespec.Sec, Nsec: src.Atimespec.Nsec}
-	dst.Mtim = fuse.Timespec{Sec: src.Mtimespec.Sec, Nsec: src.Mtimespec.Nsec}
-	dst.Ctim = fuse.Timespec{Sec: src.Ctimespec.Sec, Nsec: src.Ctimespec.Nsec}
-	dst.Birthtim = fuse.Timespec{Sec: src.Birthtimespec.Sec, Nsec: src.Birthtimespec.Nsec}
-	dst.Blksize = int64(src.Blksize)
-	dst.Blocks = int64(src.Blocks)
 }

@@ -98,10 +98,16 @@ func TestVFS_VirtualTrackListingAndAttributes(t *testing.T) {
 		t.Errorf("expected positive estimated size, got %d", st.Size)
 	}
 
-	// Test 4: Getattr on hidden monolithic audio should return ENOENT
+	// Test 4: Getattr, Open, and Opendir on hidden monolithic audio should return ENOENT
 	code = v.Getattr("/Music/Fleur/Fleur - Штормовое предупреждение.flac", &st, 0)
 	if code != -fuse.ENOENT {
-		t.Errorf("expected -ENOENT for hidden monolithic audio, got %d", code)
+		t.Errorf("expected -ENOENT for hidden monolithic audio in Getattr, got %d", code)
+	}
+	if errc, _ := v.Open("/Music/Fleur/Fleur - Штормовое предупреждение.flac", 0); errc != -fuse.ENOENT {
+		t.Errorf("expected -ENOENT for hidden monolithic audio in Open, got %d", errc)
+	}
+	if errc, _ := v.Opendir("/Music/Fleur/Fleur - Штормовое предупреждение.flac"); errc != -fuse.ENOENT {
+		t.Errorf("expected -ENOENT for hidden monolithic audio in Opendir, got %d", errc)
 	}
 
 	// Test 5: Getattr on real file cover.jpg
@@ -131,5 +137,86 @@ func assertNotContains(t *testing.T, slice []string, target string) {
 			t.Errorf("expected slice NOT to contain %q, but found it in: %v", target, slice)
 			return
 		}
+	}
+}
+
+func TestVFS_MultiAlbumInSingleDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	albumDir := filepath.Join(tmpDir, "TheWall")
+	if err := os.MkdirAll(albumDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	cd1Cue := `REM DISCNUMBER 1
+PERFORMER "Pink Floyd"
+TITLE "The Wall (CD1)"
+FILE "CD1.flac" WAVE
+  TRACK 01 AUDIO
+    TITLE "In the Flesh?"
+    INDEX 01 00:00:00
+  TRACK 02 AUDIO
+    TITLE "The Thin Ice"
+    INDEX 01 03:16:00`
+
+	cd2Cue := `REM DISCNUMBER 2
+PERFORMER "Pink Floyd"
+TITLE "The Wall (CD2)"
+FILE "CD2.flac" WAVE
+  TRACK 01 AUDIO
+    TITLE "Hey You"
+    INDEX 01 00:00:00
+  TRACK 02 AUDIO
+    TITLE "Comfortably Numb"
+    INDEX 01 04:40:00`
+
+	if err := os.WriteFile(filepath.Join(albumDir, "CD1.cue"), []byte(cd1Cue), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(albumDir, "CD2.cue"), []byte(cd2Cue), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(albumDir, "CD1.flac"), make([]byte, 2*1024*1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(albumDir, "CD2.flac"), make([]byte, 2*1024*1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(albumDir, "cover.jpg"), []byte("cover"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	v := New(Options{SourceRoot: tmpDir})
+
+	var entries []string
+	code := v.Readdir("/TheWall", func(name string, stat *fuse.Stat_t, ofst int64) bool {
+		entries = append(entries, name)
+		return true
+	}, 0, 0)
+	if code != 0 {
+		t.Fatalf("Readdir failed: %d", code)
+	}
+
+	// Real non-audio files must be preserved
+	assertContains(t, entries, "cover.jpg")
+	assertContains(t, entries, "CD1.cue")
+	assertContains(t, entries, "CD2.cue")
+
+	// Both monolithic files must be hidden
+	assertNotContains(t, entries, "CD1.flac")
+	assertNotContains(t, entries, "CD2.flac")
+
+	// Tracks from CD1 and CD2 must be present with disc prefixes to avoid collisions
+	assertContains(t, entries, "1-01. In the Flesh.flac")
+	assertContains(t, entries, "1-02. The Thin Ice.flac")
+	assertContains(t, entries, "2-01. Hey You.flac")
+	assertContains(t, entries, "2-02. Comfortably Numb.flac")
+
+	// Getattr on both discs
+	var st fuse.Stat_t
+	if code := v.Getattr("/TheWall/1-01. In the Flesh.flac", &st, 0); code != 0 {
+		t.Errorf("Getattr CD1 track failed: %d", code)
+	}
+	if code := v.Getattr("/TheWall/2-01. Hey You.flac", &st, 0); code != 0 {
+		t.Errorf("Getattr CD2 track failed: %d", code)
 	}
 }

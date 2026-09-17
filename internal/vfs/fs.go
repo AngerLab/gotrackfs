@@ -24,7 +24,6 @@ type VFS struct {
 	fuse.FileSystemBase
 	sourceRoot string
 	keepAlbum  bool
-	debug      bool
 	logger     *slog.Logger
 	cache      *AlbumCache
 
@@ -52,9 +51,8 @@ func New(opts Options) *VFS {
 	return &VFS{
 		sourceRoot: absSource,
 		keepAlbum:  opts.KeepAlbum,
-		debug:      opts.Debug,
 		logger:     logger,
-		cache:      NewAlbumCache(),
+		cache:      NewAlbumCache(logger),
 		openFiles:  make(map[uint64]*os.File),
 	}
 }

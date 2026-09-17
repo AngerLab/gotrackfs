@@ -287,7 +287,7 @@ func TestAlbumCache_DirMtimeAvoidsReaddir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cache := NewAlbumCache()
+	cache := NewAlbumCache(nil)
 
 	// Call 1 on empty dir
 	state1, err := cache.GetDirState(emptyDir)
@@ -364,8 +364,8 @@ func TestVFS_DebugAndLogger(t *testing.T) {
 		Logger:     logger,
 	})
 
-	if v.logger == nil || !v.debug {
-		t.Fatalf("expected logger and debug flag to be initialized")
+	if v.logger == nil {
+		t.Fatalf("expected logger to be initialized")
 	}
 
 	var st fuse.Stat_t

@@ -1,14 +1,16 @@
 package vfs
 
 import (
+	"log/slog"
 	"os"
 	"sync"
 )
 
 // AlbumCache caches parsed directory states to prevent re-parsing on every FUSE call.
 type AlbumCache struct {
-	mu   sync.RWMutex
-	dirs map[string]*cachedDir
+	mu     sync.RWMutex
+	dirs   map[string]*cachedDir
+	logger *slog.Logger
 }
 
 type cachedDir struct {
@@ -16,10 +18,14 @@ type cachedDir struct {
 	state *DirState
 }
 
-// NewAlbumCache creates a new empty AlbumCache.
-func NewAlbumCache() *AlbumCache {
+// NewAlbumCache creates a new empty AlbumCache with structured logging.
+func NewAlbumCache(logger *slog.Logger) *AlbumCache {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &AlbumCache{
-		dirs: make(map[string]*cachedDir),
+		dirs:   make(map[string]*cachedDir),
+		logger: logger,
 	}
 }
 
@@ -44,7 +50,7 @@ func (c *AlbumCache) GetDirState(dirPath string) (*DirState, error) {
 		}
 	}
 
-	state, facts, err := buildDirState(dirPath, dirFi)
+	state, facts, err := buildDirState(dirPath, dirFi, c.logger)
 	if err != nil {
 		return nil, err
 	}

@@ -2,6 +2,7 @@ package vfs
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -20,7 +21,11 @@ type dirFacts struct {
 
 // buildDirState discovers CUE and audio files in dirPath, parses them,
 // and computes the DirState along with dirFacts for caching.
-func buildDirState(dirPath string, dirFi os.FileInfo) (*DirState, *dirFacts, error) {
+func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger) (*DirState, *dirFacts, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+
 	cueFiles, err := findAllCueFiles(dirPath)
 	if err != nil {
 		return nil, nil, err
@@ -52,16 +57,19 @@ func buildDirState(dirPath string, dirFi os.FileInfo) (*DirState, *dirFacts, err
 	for _, cuePath := range cueFiles {
 		sheet, err := cue.ParseFile(cuePath)
 		if err != nil {
+			logger.Warn("vfs: skipping invalid cue file", "path", cuePath, "error", err)
 			continue
 		}
 
 		tracks := sheet.AllTracks()
 		if len(tracks) == 0 {
+			logger.Warn("vfs: skipping cue file with no tracks", "path", cuePath)
 			continue
 		}
 
 		// Multi-file CUEs (already split per track) are left untouched
 		if len(sheet.Files) > 1 {
+			logger.Debug("vfs: skipping multi-file cue (already split per track)", "path", cuePath)
 			continue
 		}
 
@@ -72,11 +80,13 @@ func buildDirState(dirPath string, dirFi os.FileInfo) (*DirState, *dirFacts, err
 
 		audioPath := resolveAudioFileForCue(dirPath, cuePath, declaredFile, claimedAudios)
 		if audioPath == "" {
+			logger.Warn("vfs: audio file not found for cue", "cue", cuePath, "declared", declaredFile)
 			continue
 		}
 
 		audioFi, err := os.Stat(audioPath)
 		if err != nil {
+			logger.Warn("vfs: cannot stat audio file for cue", "cue", cuePath, "audio", audioPath, "error", err)
 			continue
 		}
 		claimedAudios[audioPath] = true

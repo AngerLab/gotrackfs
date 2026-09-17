@@ -17,3 +17,7 @@
 
 # Playground
 .playground/
+
+# Repomix
+repomix-output.*
+

@@ -6,13 +6,17 @@ import (
 	"strings"
 )
 
-// determineDiscPrefix extracts or formats the disc number prefix (e.g. "1-", "2-") for multi-disc folders.
-func determineDiscPrefix(album *Album, defaultDiscNum int) string {
+// determineDiscDirName extracts or formats the virtual subdirectory name (e.g. "CD1", "CD2") for multi-album folders.
+func determineDiscDirName(album *Album, defaultDiscNum int) string {
 	if album.Sheet.DiscNumber != "" {
-		return strings.TrimSpace(album.Sheet.DiscNumber) + "-"
+		disc := strings.TrimSpace(album.Sheet.DiscNumber)
+		discLower := strings.ToLower(disc)
+		if strings.HasPrefix(discLower, "cd") || strings.HasPrefix(discLower, "disc") {
+			return disc
+		}
+		return "CD" + disc
 	}
 
-	// Try extracting from cue filename (e.g. "CD1.cue" -> "1-", "Disc 2.cue" -> "2-")
 	cueStem := strings.TrimSuffix(filepath.Base(album.CuePath), filepath.Ext(album.CuePath))
 	cueStemLower := strings.ToLower(cueStem)
 	for _, prefix := range []string{"cd", "disc", "disk"} {
@@ -20,25 +24,32 @@ func determineDiscPrefix(album *Album, defaultDiscNum int) string {
 			trimmed := strings.TrimSpace(cueStem[len(prefix):])
 			trimmed = strings.TrimLeft(trimmed, "_- ")
 			if trimmed != "" {
-				return trimmed + "-"
+				return "CD" + trimmed
 			}
 		}
 	}
 
-	return fmt.Sprintf("%d-", defaultDiscNum)
+	return fmt.Sprintf("CD%d", defaultDiscNum)
+}
+
+// addFilenameSuffix inserts a numerical suffix before the file extension, e.g. "01. Title.flac" -> "01. Title (2).flac".
+func addFilenameSuffix(filename string, suffix int) string {
+	ext := filepath.Ext(filename)
+	stem := strings.TrimSuffix(filename, ext)
+	return fmt.Sprintf("%s (%d)%s", stem, suffix, ext)
 }
 
 // formatTrackFilename generates the virtual track filename.
-func formatTrackFilename(num int, trackArtist, albumArtist, title, discPrefix, ext string) string {
+func formatTrackFilename(num int, trackArtist, albumArtist, title, ext string) string {
 	cleanTitle := sanitizeFilename(title)
 
-	// If track artist differs from album artist, format as: "[discPrefix]01. Artist - Title.flac"
+	// If track artist differs from album artist, format as: "01. Artist - Title.flac"
 	if trackArtist != "" && albumArtist != "" && !strings.EqualFold(trackArtist, albumArtist) {
 		cleanArtist := sanitizeFilename(trackArtist)
-		return fmt.Sprintf("%s%02d. %s - %s%s", discPrefix, num, cleanArtist, cleanTitle, ext)
+		return fmt.Sprintf("%02d. %s - %s%s", num, cleanArtist, cleanTitle, ext)
 	}
 
-	return fmt.Sprintf("%s%02d. %s%s", discPrefix, num, cleanTitle, ext)
+	return fmt.Sprintf("%02d. %s%s", num, cleanTitle, ext)
 }
 
 // sanitizeFilename sanitizes title and artist strings for safe use as filesystem names across platforms.

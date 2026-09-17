@@ -32,8 +32,8 @@ func main() {
 	slog.SetDefault(logger)
 
 	args := flag.Args()
-	sourceDir := "SOURCE"
-	mountPoint := "VIRTUAL"
+	sourceDir := ".playground/SOURCE"
+	mountPoint := ".playground/VIRTUAL"
 
 	if len(args) >= 1 {
 		sourceDir = args[0]

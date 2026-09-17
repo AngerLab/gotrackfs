@@ -28,14 +28,14 @@ func TestSanitizeFilename(t *testing.T) {
 	}
 }
 
-func TestDetermineDiscPrefix(t *testing.T) {
+func TestDetermineDiscDirName(t *testing.T) {
 	// Case 1: DISCNUMBER in sheet
 	album1 := &Album{
 		CuePath: "/music/album.cue",
 		Sheet:   &cue.Sheet{DiscNumber: "2"},
 	}
-	if prefix := determineDiscPrefix(album1, 1); prefix != "2-" {
-		t.Errorf("expected '2-', got %q", prefix)
+	if name := determineDiscDirName(album1, 1); name != "CD2" {
+		t.Errorf("expected 'CD2', got %q", name)
 	}
 
 	// Case 2: Disc in filename
@@ -43,8 +43,8 @@ func TestDetermineDiscPrefix(t *testing.T) {
 		CuePath: "/music/CD 03.cue",
 		Sheet:   &cue.Sheet{},
 	}
-	if prefix := determineDiscPrefix(album2, 1); prefix != "03-" {
-		t.Errorf("expected '03-', got %q", prefix)
+	if name := determineDiscDirName(album2, 1); name != "CD03" {
+		t.Errorf("expected 'CD03', got %q", name)
 	}
 
 	// Case 3: Default fallback
@@ -52,21 +52,21 @@ func TestDetermineDiscPrefix(t *testing.T) {
 		CuePath: "/music/album.cue",
 		Sheet:   &cue.Sheet{},
 	}
-	if prefix := determineDiscPrefix(album3, 4); prefix != "4-" {
-		t.Errorf("expected '4-', got %q", prefix)
+	if name := determineDiscDirName(album3, 4); name != "CD4" {
+		t.Errorf("expected 'CD4', got %q", name)
 	}
 }
 
 func TestFormatTrackFilename(t *testing.T) {
 	// Same artist as album
-	name1 := formatTrackFilename(1, "Pink Floyd", "Pink Floyd", "Time", "", ".flac")
+	name1 := formatTrackFilename(1, "Pink Floyd", "Pink Floyd", "Time", ".flac")
 	if name1 != "01. Time.flac" {
 		t.Errorf("expected '01. Time.flac', got %q", name1)
 	}
 
 	// Various artists (soundtrack / compilation)
-	name2 := formatTrackFilename(5, "David Bowie", "Various Artists", "Heroes", "1-", ".flac")
-	if name2 != "1-05. David Bowie - Heroes.flac" {
-		t.Errorf("expected '1-05. David Bowie - Heroes.flac', got %q", name2)
+	name2 := formatTrackFilename(5, "David Bowie", "Various Artists", "Heroes", ".flac")
+	if name2 != "05. David Bowie - Heroes.flac" {
+		t.Errorf("expected '05. David Bowie - Heroes.flac', got %q", name2)
 	}
 }

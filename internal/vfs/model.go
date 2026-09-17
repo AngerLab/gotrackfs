@@ -28,5 +28,7 @@ type Album struct {
 type DirState struct {
 	Albums          []*Album
 	TracksByName    map[string]*VirtualTrack
-	HiddenMonoliths map[string]bool // Basenames of monolithic files to hide
+	HiddenMonoliths map[string]bool      // Basenames of monolithic files to hide
+	Subdirs         map[string]*DirState // Virtual subdirectories (e.g. "CD1" -> sub-DirState)
+	MirroredFiles   map[string]string    // Virtual filename -> real path (e.g. "cover.jpg" -> "/path/to/cover.jpg")
 }

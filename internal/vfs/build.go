@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gotrackfs/internal/cue"
@@ -151,31 +152,69 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger) (*Dir
 		Albums:          albums,
 		TracksByName:    make(map[string]*VirtualTrack),
 		HiddenMonoliths: make(map[string]bool),
+		Subdirs:         make(map[string]*DirState),
+		MirroredFiles:   make(map[string]string),
 	}
 
-	// TODO: Support virtual subdirectories mode (e.g. via --split-discs flag).
-	// When enabled for multi-album folders (len(albums) > 1), instead of flattening
-	// with disc prefixes (1-01..., 2-01...), generate virtual subdirectories (CD1/, CD2/)
-	// and mirror cover.jpg into each.
-	isMultiAlbum := len(albums) > 1
-
-	for albumIdx, album := range albums {
+	for _, album := range albums {
 		dirState.HiddenMonoliths[filepath.Base(album.SourceAudioPath)] = true
+	}
 
-		discPrefix := ""
-		if isMultiAlbum {
-			discPrefix = determineDiscPrefix(album, albumIdx+1)
+	rawEntries, _ := os.ReadDir(dirPath)
+	realNames := make(map[string]bool, len(rawEntries))
+	parentArtwork := make(map[string]string)
+	for _, re := range rawEntries {
+		name := re.Name()
+		realNames[name] = true
+		if re.IsDir() {
+			continue
 		}
-
-		ext := filepath.Ext(album.SourceAudioPath)
-		if ext == "" {
-			ext = ".flac"
+		ext := strings.ToLower(filepath.Ext(name))
+		switch ext {
+		case ".jpg", ".jpeg", ".png", ".webp", ".gif", ".pdf":
+			parentArtwork[name] = filepath.Join(dirPath, name)
 		}
+	}
 
-		for i := range album.Tracks {
-			vt := &album.Tracks[i]
-			vt.FileName = formatTrackFilename(vt.Num, vt.Performer, album.Sheet.Performer, vt.Title, discPrefix, ext)
-			dirState.TracksByName[vt.FileName] = vt
+	if len(albums) == 1 {
+		// Single album: flat layout directly in parent directory
+		dirState.TracksByName = assignTrackFilenames(albums[0], realNames, dirPath, logger)
+	} else {
+		// Multi-album: generate virtual subdirectories (e.g. CD1/, CD2/)
+		for albumIdx, album := range albums {
+			subName := determineDiscDirName(album, albumIdx+1)
+			candSubName := subName
+			subSuffix := 2
+			for {
+				_, existsSub := dirState.Subdirs[candSubName]
+				isShadowing := realNames[candSubName]
+				if !existsSub && !isShadowing {
+					break
+				}
+				candSubName = fmt.Sprintf("%s (%d)", subName, subSuffix)
+				subSuffix++
+			}
+			if candSubName != subName {
+				logger.Warn("vfs: virtual subdir name collision, adding suffix", "dir", dirPath, "original", subName, "assigned", candSubName)
+			}
+			subName = candSubName
+
+			subOccupied := make(map[string]bool, len(parentArtwork))
+			mirrored := make(map[string]string, len(parentArtwork))
+			for artName, artPath := range parentArtwork {
+				mirrored[artName] = artPath
+				subOccupied[artName] = true
+			}
+
+			subState := &DirState{
+				Albums:          []*Album{album},
+				HiddenMonoliths: make(map[string]bool),
+				Subdirs:         make(map[string]*DirState),
+				MirroredFiles:   mirrored,
+				TracksByName:    assignTrackFilenames(album, subOccupied, filepath.Join(dirPath, subName), logger),
+			}
+
+			dirState.Subdirs[subName] = subState
 		}
 	}
 
@@ -189,4 +228,36 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger) (*Dir
 	}
 
 	return dirState, facts, nil
+}
+
+// assignTrackFilenames computes collision-free track filenames for an album against a set of already occupied names,
+// assigning numerical suffixes (e.g. "01. Title (2).flac") when conflicts arise.
+func assignTrackFilenames(album *Album, occupiedNames map[string]bool, context string, logger *slog.Logger) map[string]*VirtualTrack {
+	ext := filepath.Ext(album.SourceAudioPath)
+	if ext == "" {
+		ext = ".flac"
+	}
+
+	tracksByName := make(map[string]*VirtualTrack, len(album.Tracks))
+	for i := range album.Tracks {
+		vt := &album.Tracks[i]
+		baseName := formatTrackFilename(vt.Num, vt.Performer, album.Sheet.Performer, vt.Title, ext)
+		candidateName := baseName
+		suffix := 2
+		for {
+			isDuplicateTrack := tracksByName[candidateName] != nil
+			isOccupied := occupiedNames[candidateName]
+			if !isDuplicateTrack && !isOccupied {
+				break
+			}
+			candidateName = addFilenameSuffix(baseName, suffix)
+			suffix++
+		}
+		if candidateName != baseName && logger != nil {
+			logger.Warn("vfs: track filename collision, adding suffix", "context", context, "original", baseName, "assigned", candidateName)
+		}
+		vt.FileName = candidateName
+		tracksByName[candidateName] = vt
+	}
+	return tracksByName
 }

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -208,19 +209,75 @@ FILE "CD2.flac" WAVE
 	assertNotContains(t, entries, "CD1.flac")
 	assertNotContains(t, entries, "CD2.flac")
 
-	// Tracks from CD1 and CD2 must be present with disc prefixes to avoid collisions
-	assertContains(t, entries, "1-01. In the Flesh.flac")
-	assertContains(t, entries, "1-02. The Thin Ice.flac")
-	assertContains(t, entries, "2-01. Hey You.flac")
-	assertContains(t, entries, "2-02. Comfortably Numb.flac")
+	// Multi-album folder must present virtual subdirectories CD1 and CD2
+	assertContains(t, entries, "CD1")
+	assertContains(t, entries, "CD2")
 
-	// Getattr on both discs
+	// Tracks should not pollute the parent directory
+	assertNotContains(t, entries, "01. In the Flesh.flac")
+	assertNotContains(t, entries, "1-01. In the Flesh.flac")
+
+	// Verify CD1 virtual directory
+	var cd1Stat fuse.Stat_t
+	if code := v.Getattr("/TheWall/CD1", &cd1Stat, 0); code != 0 {
+		t.Fatalf("Getattr CD1 failed: %d", code)
+	}
+	if (cd1Stat.Mode & syscall.S_IFMT) != syscall.S_IFDIR {
+		t.Errorf("CD1 mode is not directory: %o", cd1Stat.Mode)
+	}
+
+	var cd1Entries []string
+	code = v.Readdir("/TheWall/CD1", func(name string, stat *fuse.Stat_t, ofst int64) bool {
+		cd1Entries = append(cd1Entries, name)
+		return true
+	}, 0, 0)
+	if code != 0 {
+		t.Fatalf("Readdir /TheWall/CD1 failed: %d", code)
+	}
+
+	assertContains(t, cd1Entries, "01. In the Flesh.flac")
+	assertContains(t, cd1Entries, "02. The Thin Ice.flac")
+	// Parent artwork must be mirrored into virtual subdirectories
+	assertContains(t, cd1Entries, "cover.jpg")
+
+	// Verify CD2 virtual directory
+	var cd2Entries []string
+	code = v.Readdir("/TheWall/CD2", func(name string, stat *fuse.Stat_t, ofst int64) bool {
+		cd2Entries = append(cd2Entries, name)
+		return true
+	}, 0, 0)
+	if code != 0 {
+		t.Fatalf("Readdir /TheWall/CD2 failed: %d", code)
+	}
+
+	assertContains(t, cd2Entries, "01. Hey You.flac")
+	assertContains(t, cd2Entries, "02. Comfortably Numb.flac")
+	assertContains(t, cd2Entries, "cover.jpg")
+
+	// Getattr on tracks inside virtual subdirectories
 	var st fuse.Stat_t
-	if code := v.Getattr("/TheWall/1-01. In the Flesh.flac", &st, 0); code != 0 {
+	if code := v.Getattr("/TheWall/CD1/01. In the Flesh.flac", &st, 0); code != 0 {
 		t.Errorf("Getattr CD1 track failed: %d", code)
 	}
-	if code := v.Getattr("/TheWall/2-01. Hey You.flac", &st, 0); code != 0 {
+	if code := v.Getattr("/TheWall/CD2/01. Hey You.flac", &st, 0); code != 0 {
 		t.Errorf("Getattr CD2 track failed: %d", code)
+	}
+
+	// Read mirrored artwork inside virtual subdirectory
+	openCode, fh := v.Open("/TheWall/CD1/cover.jpg", fuse.O_RDONLY)
+	if openCode != 0 {
+		t.Fatalf("Open mirrored cover.jpg failed: %d", openCode)
+	}
+	buf := make([]byte, 10)
+	n := v.Read("/TheWall/CD1/cover.jpg", buf, 0, fh)
+	if n != 5 || string(buf[:n]) != "cover" {
+		t.Errorf("expected 'cover', got %q", string(buf[:n]))
+	}
+	v.Release("/TheWall/CD1/cover.jpg", fh)
+
+	// Opening virtual directory as a file must return EISDIR
+	if code, _ := v.Open("/TheWall/CD1", fuse.O_RDONLY); code != -fuse.EISDIR {
+		t.Errorf("Open on virtual dir expected EISDIR (-%d), got %d", fuse.EISDIR, code)
 	}
 }
 
@@ -372,6 +429,213 @@ func TestVFS_DebugAndLogger(t *testing.T) {
 	code := v.Getattr("/", &st, 0)
 	if code != 0 {
 		t.Fatalf("Getattr(/) failed: %d", code)
+	}
+}
+
+func TestVFS_CollisionAvoidance(t *testing.T) {
+	tmpDir := t.TempDir()
+	albumDir := filepath.Join(tmpDir, "CollisionAlbum")
+	if err := os.MkdirAll(albumDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cueContent := `TITLE "Collisions"
+FILE "audio.flac" WAVE
+  TRACK 01 AUDIO
+    TITLE "Same Title"
+    INDEX 01 00:00:00
+  TRACK 01 AUDIO
+    TITLE "Same Title"
+    INDEX 01 01:00:00
+  TRACK 02 AUDIO
+    TITLE "Real File Shadow"
+    INDEX 01 02:00:00`
+
+	if err := os.WriteFile(filepath.Join(albumDir, "album.cue"), []byte(cueContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(albumDir, "audio.flac"), make([]byte, 1024*1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a real file on disk that would be shadowed by TRACK 02
+	realFilePath := filepath.Join(albumDir, "02. Real File Shadow.flac")
+	if err := os.WriteFile(realFilePath, []byte("REAL_CONTENT"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	v := New(Options{
+		SourceRoot: tmpDir,
+		Logger:     logger,
+	})
+
+	var entries []string
+	code := v.Readdir("/CollisionAlbum", func(name string, stat *fuse.Stat_t, ofst int64) bool {
+		entries = append(entries, name)
+		return true
+	}, 0, 0)
+	if code != 0 {
+		t.Fatalf("Readdir failed: %d", code)
+	}
+
+	// 1. Duplicate track in CUE got suffix (2)
+	assertContains(t, entries, "01. Same Title.flac")
+	assertContains(t, entries, "01. Same Title (2).flac")
+
+	// 2. Real file on disk is preserved, and virtual track got suffix (2)
+	assertContains(t, entries, "02. Real File Shadow.flac")
+	assertContains(t, entries, "02. Real File Shadow (2).flac")
+
+	// 3. Verify reading the real file returns real content, not ENOSYS
+	openCode, fh := v.Open("/CollisionAlbum/02. Real File Shadow.flac", fuse.O_RDONLY)
+	if openCode != 0 {
+		t.Fatalf("Open real file failed: %d", openCode)
+	}
+	buf := make([]byte, 20)
+	n := v.Read("/CollisionAlbum/02. Real File Shadow.flac", buf, 0, fh)
+	if string(buf[:n]) != "REAL_CONTENT" {
+		t.Errorf("expected 'REAL_CONTENT', got %q", string(buf[:n]))
+	}
+	v.Release("/CollisionAlbum/02. Real File Shadow.flac", fh)
+
+	// 4. Verify virtual track with suffix (2) returns ENOSYS on Open (virtual track)
+	openVirtCode, _ := v.Open("/CollisionAlbum/02. Real File Shadow (2).flac", fuse.O_RDONLY)
+	if openVirtCode != -fuse.ENOSYS {
+		t.Errorf("expected ENOSYS for virtual track, got %d", openVirtCode)
+	}
+
+	// 5. Verify warnings were logged for both collisions
+	logOutput := logBuf.String()
+	if !strings.Contains(logOutput, "track filename collision") {
+		t.Errorf("expected collision warnings in log, got: %s", logOutput)
+	}
+}
+
+func TestVFS_DirectoryAndMonolithCollisions(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// 1. Multi-album folder with a REAL existing CD1 directory on disk
+	multiDir := filepath.Join(tmpDir, "MultiWithRealCD1")
+	if err := os.MkdirAll(filepath.Join(multiDir, "CD1"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(multiDir, "CD1", "scan.jpg"), []byte("SCAN"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(multiDir, "CD1.flac"), make([]byte, 1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(multiDir, "CD2.flac"), make([]byte, 1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cue1 := `TITLE "Multi CD1"
+FILE "CD1.flac" WAVE
+  TRACK 01 AUDIO
+    TITLE "Track 1"
+    INDEX 01 00:00:00`
+	cue2 := `TITLE "Multi CD2"
+FILE "CD2.flac" WAVE
+  TRACK 01 AUDIO
+    TITLE "Track 2"
+    INDEX 01 00:00:00`
+	if err := os.WriteFile(filepath.Join(multiDir, "CD1.cue"), []byte(cue1), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(multiDir, "CD2.cue"), []byte(cue2), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Single-album where track name collides with hidden monolithic filename
+	singleDir := filepath.Join(tmpDir, "MonolithCollision")
+	if err := os.MkdirAll(singleDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Monolith audio file is literally named "01. Intro.flac"
+	if err := os.WriteFile(filepath.Join(singleDir, "01. Intro.flac"), make([]byte, 1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+	singleCue := `TITLE "Single"
+FILE "01. Intro.flac" WAVE
+  TRACK 01 AUDIO
+    TITLE "Intro"
+    INDEX 01 00:00:00`
+	if err := os.WriteFile(filepath.Join(singleDir, "album.cue"), []byte(singleCue), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	v := New(Options{
+		SourceRoot: tmpDir,
+		Logger:     logger,
+	})
+
+	// Check multi-album directory
+	var multiEntries []string
+	code := v.Readdir("/MultiWithRealCD1", func(name string, stat *fuse.Stat_t, ofst int64) bool {
+		multiEntries = append(multiEntries, name)
+		return true
+	}, 0, 0)
+	if code != 0 {
+		t.Fatalf("Readdir MultiWithRealCD1 failed: %d", code)
+	}
+
+	// Real CD1 directory on disk must be preserved!
+	assertContains(t, multiEntries, "CD1")
+	// Virtual CD1 directory must get suffix (2) to avoid shadowing!
+	assertContains(t, multiEntries, "CD1 (2)")
+	// Virtual CD2 directory remains CD2
+	assertContains(t, multiEntries, "CD2")
+
+	// Verify real CD1 contains real scan.jpg
+	var realCD1Entries []string
+	code = v.Readdir("/MultiWithRealCD1/CD1", func(name string, stat *fuse.Stat_t, ofst int64) bool {
+		realCD1Entries = append(realCD1Entries, name)
+		return true
+	}, 0, 0)
+	if code != 0 {
+		t.Fatalf("Readdir /MultiWithRealCD1/CD1 failed: %d", code)
+	}
+	assertContains(t, realCD1Entries, "scan.jpg")
+
+	// Verify virtual CD1 (2) contains virtual track
+	var virtCD1Entries []string
+	code = v.Readdir("/MultiWithRealCD1/CD1 (2)", func(name string, stat *fuse.Stat_t, ofst int64) bool {
+		virtCD1Entries = append(virtCD1Entries, name)
+		return true
+	}, 0, 0)
+	if code != 0 {
+		t.Fatalf("Readdir /MultiWithRealCD1/CD1 (2) failed: %d", code)
+	}
+	assertContains(t, virtCD1Entries, "01. Track 1.flac")
+
+	// Check single-album directory
+	var singleEntries []string
+	code = v.Readdir("/MonolithCollision", func(name string, stat *fuse.Stat_t, ofst int64) bool {
+		singleEntries = append(singleEntries, name)
+		return true
+	}, 0, 0)
+	if code != 0 {
+		t.Fatalf("Readdir MonolithCollision failed: %d", code)
+	}
+
+	// Hidden monolith "01. Intro.flac" must NOT be listed
+	assertNotContains(t, singleEntries, "01. Intro.flac")
+	// Virtual track must have received suffix "(2)" and be listed!
+	assertContains(t, singleEntries, "01. Intro (2).flac")
+
+	// Getattr on virtual track must succeed
+	var st fuse.Stat_t
+	if code := v.Getattr("/MonolithCollision/01. Intro (2).flac", &st, 0); code != 0 {
+		t.Errorf("Getattr on virtual track with suffix failed: %d", code)
+	}
+	// Getattr on hidden monolith must return ENOENT
+	if code := v.Getattr("/MonolithCollision/01. Intro.flac", &st, 0); code != -fuse.ENOENT {
+		t.Errorf("expected ENOENT for hidden monolith, got %d", code)
 	}
 }
 

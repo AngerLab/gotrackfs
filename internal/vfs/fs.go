@@ -59,17 +59,43 @@ func New(opts Options) *VFS {
 	}
 }
 
-func (v *VFS) isHidden(dir, base string) bool {
-	if v.keepAlbum {
-		return false
-	}
+type resolvedNode struct {
+	cleanPath string
+	realPath  string
+	dirState  *DirState
+	track     *VirtualTrack
+	isHidden  bool
+}
+
+func (v *VFS) resolve(path, op string) resolvedNode {
+	cleanPath := filepath.Clean(path)
+	dir := filepath.Dir(cleanPath)
+	base := filepath.Base(cleanPath)
 	realDir := filepath.Join(v.sourceRoot, dir)
+	realPath := filepath.Join(v.sourceRoot, cleanPath)
+
 	dirState, err := v.cache.GetDirState(realDir)
 	if err != nil {
-		v.logger.Debug("cache: failed to get dir state in isHidden", "dir", realDir, "error", err)
-		return false
+		v.logger.Debug("cache: failed to get dir state", "op", op, "dir", realDir, "path", cleanPath, "error", err)
 	}
-	return dirState != nil && dirState.HiddenMonoliths[base]
+
+	node := resolvedNode{
+		cleanPath: cleanPath,
+		realPath:  realPath,
+		dirState:  dirState,
+	}
+
+	if dirState != nil {
+		if !v.keepAlbum && dirState.HiddenMonoliths[base] {
+			node.isHidden = true
+			return node
+		}
+		if vt, ok := dirState.TracksByName[base]; ok {
+			node.track = vt
+		}
+	}
+
+	return node
 }
 
 func (v *VFS) Statfs(path string, stat *fuse.Statfs_t) int {
@@ -87,37 +113,26 @@ func (v *VFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 		return v.statRealPath(v.sourceRoot, stat)
 	}
 
-	dir := filepath.Dir(cleanPath)
-	base := filepath.Base(cleanPath)
-
-	// If this is one of the hidden monolithic audio files, return ENOENT
-	if v.isHidden(dir, base) {
+	node := v.resolve(cleanPath, "Getattr")
+	if node.isHidden {
 		return -fuse.ENOENT
 	}
 
-	realDir := filepath.Join(v.sourceRoot, dir)
-	dirState, err := v.cache.GetDirState(realDir)
-	if err != nil {
-		v.logger.Debug("cache: failed to get dir state in Getattr", "dir", realDir, "path", cleanPath, "error", err)
-	}
-	if dirState != nil {
-		if vt, ok := dirState.TracksByName[base]; ok {
-			// Virtual track entry
-			var st syscall.Stat_t
-			if err := syscall.Lstat(vt.SourceAudioPath, &st); err != nil {
-				return -fuse.ENOENT
-			}
-
-			copyStat(stat, &st)
-			stat.Size = vt.EstimatedSize
-			stat.Mode = syscall.S_IFREG | 0444
-			return 0
+	if node.track != nil {
+		// Virtual track entry
+		var st syscall.Stat_t
+		if err := syscall.Lstat(node.track.SourceAudioPath, &st); err != nil {
+			return -fuse.ENOENT
 		}
+
+		copyStat(stat, &st)
+		stat.Size = node.track.EstimatedSize
+		stat.Mode = syscall.S_IFREG | 0444
+		return 0
 	}
 
 	// Real file / directory
-	realPath := filepath.Join(v.sourceRoot, cleanPath)
-	return v.statRealPath(realPath, stat)
+	return v.statRealPath(node.realPath, stat)
 }
 
 func (v *VFS) statRealPath(realPath string, stat *fuse.Stat_t) int {
@@ -131,16 +146,17 @@ func (v *VFS) statRealPath(realPath string, stat *fuse.Stat_t) int {
 
 func (v *VFS) Opendir(path string) (int, uint64) {
 	cleanPath := filepath.Clean(path)
-	dir := filepath.Dir(cleanPath)
-	base := filepath.Base(cleanPath)
+	if cleanPath == "/" || cleanPath == "." {
+		return 0, 0
+	}
 
-	if v.isHidden(dir, base) {
+	node := v.resolve(cleanPath, "Opendir")
+	if node.isHidden {
 		return -fuse.ENOENT, ^uint64(0)
 	}
 
-	realDir := filepath.Join(v.sourceRoot, cleanPath)
 	var st syscall.Stat_t
-	if err := syscall.Lstat(realDir, &st); err != nil {
+	if err := syscall.Lstat(node.realPath, &st); err != nil {
 		return -fuse.ENOENT, ^uint64(0)
 	}
 	if (st.Mode & syscall.S_IFMT) != syscall.S_IFDIR {
@@ -203,28 +219,16 @@ func (v *VFS) Open(path string, flags int) (int, uint64) {
 	}
 
 	cleanPath := filepath.Clean(path)
-	dir := filepath.Dir(cleanPath)
-	base := filepath.Base(cleanPath)
-
-	// Consistent with Getattr: hidden monoliths cannot be opened
-	if v.isHidden(dir, base) {
+	node := v.resolve(cleanPath, "Open")
+	if node.isHidden {
 		return -fuse.ENOENT, ^uint64(0)
 	}
-
-	realDir := filepath.Join(v.sourceRoot, dir)
-	dirState, err := v.cache.GetDirState(realDir)
-	if err != nil {
-		v.logger.Debug("cache: failed to get dir state in Open", "dir", realDir, "path", cleanPath, "error", err)
-	}
-	if dirState != nil {
-		if _, ok := dirState.TracksByName[base]; ok {
-			// Slicing not implemented yet
-			return -fuse.ENOSYS, ^uint64(0)
-		}
+	if node.track != nil {
+		// Slicing not implemented yet
+		return -fuse.ENOSYS, ^uint64(0)
 	}
 
-	realPath := filepath.Join(v.sourceRoot, cleanPath)
-	f, err := os.Open(realPath)
+	f, err := os.Open(node.realPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return -fuse.ENOENT, ^uint64(0)

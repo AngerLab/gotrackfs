@@ -1,6 +1,8 @@
 package vfs
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -350,4 +352,27 @@ FILE "music.flac" WAVE
 		t.Errorf("expected pointer equality for cached DirState, got different pointers")
 	}
 }
+
+func TestVFS_DebugAndLogger(t *testing.T) {
+	tmpDir := t.TempDir()
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	v := New(Options{
+		SourceRoot: tmpDir,
+		Debug:      true,
+		Logger:     logger,
+	})
+
+	if v.logger == nil || !v.debug {
+		t.Fatalf("expected logger and debug flag to be initialized")
+	}
+
+	var st fuse.Stat_t
+	code := v.Getattr("/", &st, 0)
+	if code != 0 {
+		t.Fatalf("Getattr(/) failed: %d", code)
+	}
+}
+
 

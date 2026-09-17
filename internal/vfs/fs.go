@@ -2,6 +2,7 @@ package vfs
 
 import (
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -13,8 +14,9 @@ import (
 // Options holds configuration options for the VFS filesystem.
 type Options struct {
 	SourceRoot string
-	KeepAlbum  bool // If true, keep monolithic audio files visible alongside virtual tracks
-	Debug      bool
+	KeepAlbum  bool         // If true, keep monolithic audio files visible alongside virtual tracks
+	Debug      bool         // If true, enables verbose debug logging
+	Logger     *slog.Logger // Optional structured logger. If nil, a default text logger is used with level based on Debug.
 }
 
 // VFS implements fuse.FileSystemInterface using a path-based routing model.
@@ -22,6 +24,8 @@ type VFS struct {
 	fuse.FileSystemBase
 	sourceRoot string
 	keepAlbum  bool
+	debug      bool
+	logger     *slog.Logger
 	cache      *AlbumCache
 
 	mu         sync.Mutex
@@ -36,9 +40,20 @@ func New(opts Options) *VFS {
 		absSource = opts.SourceRoot
 	}
 
+	logger := opts.Logger
+	if logger == nil {
+		level := slog.LevelInfo
+		if opts.Debug {
+			level = slog.LevelDebug
+		}
+		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	}
+
 	return &VFS{
 		sourceRoot: absSource,
 		keepAlbum:  opts.KeepAlbum,
+		debug:      opts.Debug,
+		logger:     logger,
 		cache:      NewAlbumCache(),
 		openFiles:  make(map[uint64]*os.File),
 	}
@@ -49,7 +64,11 @@ func (v *VFS) isHidden(dir, base string) bool {
 		return false
 	}
 	realDir := filepath.Join(v.sourceRoot, dir)
-	dirState, _ := v.cache.GetDirState(realDir)
+	dirState, err := v.cache.GetDirState(realDir)
+	if err != nil {
+		v.logger.Debug("cache: failed to get dir state in isHidden", "dir", realDir, "error", err)
+		return false
+	}
 	return dirState != nil && dirState.HiddenMonoliths[base]
 }
 
@@ -77,7 +96,10 @@ func (v *VFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 	}
 
 	realDir := filepath.Join(v.sourceRoot, dir)
-	dirState, _ := v.cache.GetDirState(realDir)
+	dirState, err := v.cache.GetDirState(realDir)
+	if err != nil {
+		v.logger.Debug("cache: failed to get dir state in Getattr", "dir", realDir, "path", cleanPath, "error", err)
+	}
 	if dirState != nil {
 		if vt, ok := dirState.TracksByName[base]; ok {
 			// Virtual track entry
@@ -144,7 +166,10 @@ func (v *VFS) Readdir(path string, fill func(name string, stat *fuse.Stat_t, ofs
 	fill(".", nil, 0)
 	fill("..", nil, 0)
 
-	dirState, _ := v.cache.GetDirState(realDir)
+	dirState, err := v.cache.GetDirState(realDir)
+	if err != nil {
+		v.logger.Debug("cache: failed to get dir state in Readdir", "dir", realDir, "error", err)
+	}
 	if dirState != nil {
 		// Emit real entries (excluding the hidden monolithic audio files)
 		for _, e := range entries {
@@ -187,7 +212,10 @@ func (v *VFS) Open(path string, flags int) (int, uint64) {
 	}
 
 	realDir := filepath.Join(v.sourceRoot, dir)
-	dirState, _ := v.cache.GetDirState(realDir)
+	dirState, err := v.cache.GetDirState(realDir)
+	if err != nil {
+		v.logger.Debug("cache: failed to get dir state in Open", "dir", realDir, "path", cleanPath, "error", err)
+	}
 	if dirState != nil {
 		if _, ok := dirState.TracksByName[base]; ok {
 			// Slicing not implemented yet

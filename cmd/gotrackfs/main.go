@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -19,9 +20,16 @@ func main() {
 		debug     bool
 		keepAlbum bool
 	)
-	flag.BoolVar(&debug, "debug", false, "Enable FUSE debug logging")
+	flag.BoolVar(&debug, "debug", false, "Enable FUSE and VFS debug logging")
 	flag.BoolVar(&keepAlbum, "keep-album", false, "Keep monolithic audio file visible alongside virtual tracks")
 	flag.Parse()
+
+	logLevel := slog.LevelInfo
+	if debug {
+		logLevel = slog.LevelDebug
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
+	slog.SetDefault(logger)
 
 	args := flag.Args()
 	sourceDir := "SOURCE"
@@ -55,6 +63,7 @@ func main() {
 		SourceRoot: absSource,
 		KeepAlbum:  keepAlbum,
 		Debug:      debug,
+		Logger:     logger,
 	})
 	host := fuse.NewFileSystemHost(fs)
 

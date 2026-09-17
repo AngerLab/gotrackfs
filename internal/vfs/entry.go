@@ -103,10 +103,15 @@ func (c *AlbumCache) GetDirState(dirPath string) (*DirState, error) {
 	for _, cp := range cueFiles {
 		fi, err := os.Stat(cp)
 		if err != nil {
-			return nil, err
+			// If file disappeared concurrently, skip it rather than failing the whole directory
+			continue
 		}
 		currentModTimes[cp] = fi.ModTime()
 		currentSizes[cp] = fi.Size()
+	}
+
+	if len(currentModTimes) == 0 {
+		return nil, nil
 	}
 
 	// Parse all CUE files and build DirState

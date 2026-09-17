@@ -11,6 +11,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      # cgofuse builds against libfuse2 headers by default; use libfuse3 on Linux
+      GOFLAGS: ${{ runner.os == 'Linux' && '-tags=fuse3' || '' }}
     steps:
       - uses: actions/checkout@v4
 

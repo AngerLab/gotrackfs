@@ -47,6 +47,7 @@ type AlbumCache struct {
 }
 
 type cachedDir struct {
+	dirModTime    time.Time            // mtime of the directory itself
 	cueModTimes   map[string]time.Time // cuePath -> modTime
 	cueSizes      map[string]int64     // cuePath -> size
 	audioModTimes map[string]time.Time // audioPath -> modTime
@@ -62,9 +63,37 @@ func NewAlbumCache() *AlbumCache {
 
 // GetDirState returns the DirState for dirPath, or parses it if needed.
 func (c *AlbumCache) GetDirState(dirPath string) (*DirState, error) {
+	dirFi, err := os.Stat(dirPath)
+	if err != nil {
+		return nil, err
+	}
+
+	c.mu.RLock()
+	cached, ok := c.dirs[dirPath]
+	c.mu.RUnlock()
+
+	if ok && cached != nil && cached.dirModTime.Equal(dirFi.ModTime()) {
+		if cached.state == nil && len(cached.cueModTimes) == 0 {
+			// Directory has no CUE files and directory contents have not changed.
+			return nil, nil
+		}
+		if isFilesCacheValid(cached) {
+			return cached.state, nil
+		}
+	}
+
 	// Find all .cue files in this directory
 	cueFiles, err := findAllCueFiles(dirPath)
-	if err != nil || len(cueFiles) == 0 {
+	if err != nil {
+		return nil, err
+	}
+	if len(cueFiles) == 0 {
+		c.mu.Lock()
+		c.dirs[dirPath] = &cachedDir{
+			dirModTime: dirFi.ModTime(),
+			state:      nil,
+		}
+		c.mu.Unlock()
 		return nil, nil
 	}
 
@@ -78,14 +107,6 @@ func (c *AlbumCache) GetDirState(dirPath string) (*DirState, error) {
 		}
 		currentModTimes[cp] = fi.ModTime()
 		currentSizes[cp] = fi.Size()
-	}
-
-	c.mu.RLock()
-	cached, ok := c.dirs[dirPath]
-	c.mu.RUnlock()
-
-	if ok && cached != nil && isCacheValid(cached, currentModTimes, currentSizes) {
-		return cached.state, nil
 	}
 
 	// Parse all CUE files and build DirState
@@ -178,6 +199,7 @@ func (c *AlbumCache) GetDirState(dirPath string) (*DirState, error) {
 	if len(albums) == 0 {
 		c.mu.Lock()
 		c.dirs[dirPath] = &cachedDir{
+			dirModTime:  dirFi.ModTime(),
 			cueModTimes: currentModTimes,
 			cueSizes:    currentSizes,
 			state:       nil,
@@ -229,6 +251,7 @@ func (c *AlbumCache) GetDirState(dirPath string) (*DirState, error) {
 
 	c.mu.Lock()
 	c.dirs[dirPath] = &cachedDir{
+		dirModTime:    dirFi.ModTime(),
 		cueModTimes:   currentModTimes,
 		cueSizes:      currentSizes,
 		audioModTimes: audioModTimes,
@@ -240,16 +263,10 @@ func (c *AlbumCache) GetDirState(dirPath string) (*DirState, error) {
 	return dirState, nil
 }
 
-func isCacheValid(cached *cachedDir, currentModTimes map[string]time.Time, currentSizes map[string]int64) bool {
-	if len(cached.cueModTimes) != len(currentModTimes) {
-		return false
-	}
-	for cp, mtime := range currentModTimes {
-		oldMtime, ok := cached.cueModTimes[cp]
-		if !ok || !oldMtime.Equal(mtime) {
-			return false
-		}
-		if cached.cueSizes[cp] != currentSizes[cp] {
+func isFilesCacheValid(cached *cachedDir) bool {
+	for cp, oldMtime := range cached.cueModTimes {
+		fi, err := os.Stat(cp)
+		if err != nil || !fi.ModTime().Equal(oldMtime) || fi.Size() != cached.cueSizes[cp] {
 			return false
 		}
 	}

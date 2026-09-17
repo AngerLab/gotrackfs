@@ -277,3 +277,77 @@ FILE "audio.flac" WAVE
 		t.Errorf("expected new size to be larger (old=%d, new=%d)", st1.Size, st2.Size)
 	}
 }
+
+func TestAlbumCache_DirMtimeAvoidsReaddir(t *testing.T) {
+	tmpDir := t.TempDir()
+	emptyDir := filepath.Join(tmpDir, "NonAlbum")
+	if err := os.MkdirAll(emptyDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cache := NewAlbumCache()
+
+	// Call 1 on empty dir
+	state1, err := cache.GetDirState(emptyDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if state1 != nil {
+		t.Fatalf("expected nil state for non-album dir, got: %v", state1)
+	}
+
+	// Verify cached
+	cache.mu.RLock()
+	cached, ok := cache.dirs[emptyDir]
+	cache.mu.RUnlock()
+	if !ok || cached == nil {
+		t.Fatalf("expected empty dir to be cached")
+	}
+	if cached.state != nil {
+		t.Fatalf("expected cached.state to be nil")
+	}
+
+	// Call 2 on empty dir should return cached nil
+	state2, err := cache.GetDirState(emptyDir)
+	if err != nil || state2 != nil {
+		t.Fatalf("expected nil state on cache hit, got %v, err: %v", state2, err)
+	}
+
+	// Now add a CUE + audio into emptyDir (which changes directory mtime)
+	cueContent := `TITLE "NewAlbum"
+FILE "music.flac" WAVE
+  TRACK 01 AUDIO
+    TITLE "Track 1"
+    INDEX 01 00:00:00`
+	if err := os.WriteFile(filepath.Join(emptyDir, "music.flac"), make([]byte, 1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(emptyDir, "album.cue"), []byte(cueContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Force directory mtime change in case filesystem timestamp resolution is coarse
+	newDirMtime := time.Now().Add(2 * time.Second)
+	_ = os.Chtimes(emptyDir, newDirMtime, newDirMtime)
+
+	// Call 3: should detect directory mtime change and discover the new album!
+	state3, err := cache.GetDirState(emptyDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if state3 == nil {
+		t.Fatalf("expected state after adding cue, got nil")
+	}
+	if len(state3.TracksByName) != 1 {
+		t.Fatalf("expected 1 track, got %d", len(state3.TracksByName))
+	}
+
+	// Call 4: should return exact same state pointer from cache without re-parsing
+	state4, err := cache.GetDirState(emptyDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if state4 != state3 {
+		t.Errorf("expected pointer equality for cached DirState, got different pointers")
+	}
+}
+

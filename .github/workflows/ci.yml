@@ -11,9 +11,6 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    env:
-      # cgofuse builds against libfuse2 headers by default; use libfuse3 on Linux
-      GOFLAGS: ${{ runner.os == 'Linux' && '-tags=fuse3' || '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -30,7 +27,12 @@ jobs:
         run: brew install macos-fuse-t/homebrew-cask/fuse-t
 
       - name: Vet
+        env:
+          # cgofuse builds against libfuse2 headers by default; use libfuse3 on Linux
+          GOFLAGS: ${{ runner.os == 'Linux' && '-tags=fuse3' || '' }}
         run: go vet ./...
 
       - name: Test
+        env:
+          GOFLAGS: ${{ runner.os == 'Linux' && '-tags=fuse3' || '' }}
         run: go test -race ./...

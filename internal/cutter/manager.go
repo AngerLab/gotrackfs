@@ -15,9 +15,19 @@ import (
 // Options holds configuration for TrackCacheManager.
 type Options struct {
 	Cutter  Cutter
-	TempDir string        // If empty, creates a subdirectory in os.TempDir()
+	TempDir string        // If empty, a subdirectory in os.TempDir() is created at construction time
 	TTL     time.Duration // Time-to-live after refCount reaches 0. Default: 60s
 	Logger  *slog.Logger
+}
+
+// EnsureDefaults fills in zero-value fields with production-ready defaults.
+func (o *Options) EnsureDefaults() {
+	if o.TTL <= 0 {
+		o.TTL = 60 * time.Second
+	}
+	if o.Logger == nil {
+		o.Logger = slog.Default()
+	}
 }
 
 type trackEntry struct {
@@ -45,6 +55,8 @@ type TrackCacheManager struct {
 
 // NewManager creates and initializes a new TrackCacheManager.
 func NewManager(opts Options) (*TrackCacheManager, error) {
+	opts.EnsureDefaults()
+
 	tempDir := opts.TempDir
 	if tempDir == "" {
 		var err error
@@ -58,21 +70,11 @@ func NewManager(opts Options) (*TrackCacheManager, error) {
 		}
 	}
 
-	ttl := opts.TTL
-	if ttl <= 0 {
-		ttl = 60 * time.Second
-	}
-
-	logger := opts.Logger
-	if logger == nil {
-		logger = slog.Default()
-	}
-
 	return &TrackCacheManager{
 		cutter:  opts.Cutter,
 		tempDir: tempDir,
-		ttl:     ttl,
-		logger:  logger,
+		ttl:     opts.TTL,
+		logger:  opts.Logger,
 		entries: make(map[string]*trackEntry),
 	}, nil
 }

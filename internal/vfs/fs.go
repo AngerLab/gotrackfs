@@ -18,7 +18,6 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
-
 // inodeFromPath deterministically generates a unique, stable 64-bit inode number from a clean VFS path.
 // Following restic conventions: root is 1, 0 is invalid, and hashes < 2 are remapped to >= 2.
 func inodeFromPath(cleanPath string) uint64 {
@@ -43,10 +42,24 @@ type TrackSlicer interface {
 // Options holds configuration options for the VFS filesystem.
 type Options struct {
 	SourceRoot string
-	KeepAlbum  bool          // If true, keep monolithic audio files visible alongside virtual tracks
-	Debug      bool          // If true, enables verbose debug logging
-	Logger     *slog.Logger  // Optional structured logger. If nil, a default text logger is used with level based on Debug.
+	KeepAlbum  bool         // If true, keep monolithic audio files visible alongside virtual tracks
+	Debug      bool         // If true, enables verbose debug logging
+	Logger     *slog.Logger // Optional structured logger. If nil, a default text logger is used with level based on Debug.
 	Slicer     TrackSlicer  // Optional audio slicer implementation. If nil, virtual track playback is disabled (Open returns ENOSYS).
+}
+
+// EnsureDefaults fills in zero-value fields with production-ready defaults.
+func (o *Options) EnsureDefaults() {
+	if o.Logger == nil {
+		level := slog.LevelInfo
+		if o.Debug {
+			level = slog.LevelDebug
+		}
+		o.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	}
+	if abs, err := filepath.Abs(o.SourceRoot); err == nil {
+		o.SourceRoot = abs
+	}
 }
 
 type fileHandle struct {
@@ -74,25 +87,13 @@ type VFS struct {
 
 // New creates a new VFS instance.
 func New(opts Options) *VFS {
-	absSource, err := filepath.Abs(opts.SourceRoot)
-	if err != nil {
-		absSource = opts.SourceRoot
-	}
-
-	logger := opts.Logger
-	if logger == nil {
-		level := slog.LevelInfo
-		if opts.Debug {
-			level = slog.LevelDebug
-		}
-		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
-	}
+	opts.EnsureDefaults()
 
 	return &VFS{
-		sourceRoot: absSource,
+		sourceRoot: opts.SourceRoot,
 		keepAlbum:  opts.KeepAlbum,
-		logger:     logger,
-		cache:      NewAlbumCache(logger),
+		logger:     opts.Logger,
+		cache:      NewAlbumCache(opts.Logger),
 		slicer:     opts.Slicer,
 		openFiles:  make(map[uint64]*fileHandle),
 	}

@@ -13,10 +13,12 @@ import (
 	"time"
 
 	"gotrackfs/internal/cutter"
+	"gotrackfs/internal/track"
 
 	"github.com/winfsp/cgofuse/fuse"
 	"golang.org/x/text/unicode/norm"
 )
+
 
 func TestVFS_VirtualTrackListingAndAttributes(t *testing.T) {
 	// Create test structure in temp dir
@@ -647,10 +649,10 @@ FILE "01. Intro.flac" WAVE
 
 type testMockCutter struct {
 	cutCount int
-	lastReq  cutter.TrackRequest
+	lastReq  track.Slice
 }
 
-func (m *testMockCutter) Cut(ctx context.Context, req cutter.TrackRequest, outputPath string) error {
+func (m *testMockCutter) Cut(ctx context.Context, req track.Slice, outputPath string) error {
 	m.cutCount++
 	m.lastReq = req
 	return os.WriteFile(outputPath, []byte("REAL_SLICED_AUDIO_BYTES_FROM_CUTTER"), 0644)
@@ -854,7 +856,7 @@ type cancellingMockCutter struct {
 	mu           sync.Mutex
 }
 
-func (c *cancellingMockCutter) Cut(ctx context.Context, req cutter.TrackRequest, outputPath string) error {
+func (c *cancellingMockCutter) Cut(ctx context.Context, req track.Slice, outputPath string) error {
 	defer close(c.cutDone)
 	select {
 	case <-time.After(200 * time.Millisecond):

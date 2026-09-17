@@ -8,11 +8,13 @@ import (
 	"os/exec"
 	"slices"
 	"time"
+
+	"gotrackfs/internal/track"
 )
 
 // Cutter defines the interface for slicing an audio track into an output file.
 type Cutter interface {
-	Cut(ctx context.Context, req TrackRequest, outputPath string) error
+	Cut(ctx context.Context, req track.Slice, outputPath string) error
 }
 
 // FFmpegCutter invokes the external ffmpeg binary to slice audio and apply metadata.
@@ -57,7 +59,7 @@ func (c *FFmpegCutter) SetTimeout(d time.Duration) {
 }
 
 // BuildArgs constructs the CLI arguments for ffmpeg.
-func (c *FFmpegCutter) BuildArgs(req TrackRequest, outputPath string) []string {
+func (c *FFmpegCutter) BuildArgs(req track.Slice, outputPath string) []string {
 	var args []string
 	args = append(args, "-y", "-v", "error") // overwrite output, suppress non-error logs
 
@@ -100,7 +102,7 @@ func (c *FFmpegCutter) BuildArgs(req TrackRequest, outputPath string) []string {
 // Cut executes ffmpeg to generate the sliced track.
 // If embedding artwork fails (e.g. corrupt or unsupported image format),
 // it logs a warning and gracefully retries cutting audio without artwork.
-func (c *FFmpegCutter) Cut(ctx context.Context, req TrackRequest, outputPath string) error {
+func (c *FFmpegCutter) Cut(ctx context.Context, req track.Slice, outputPath string) error {
 	if c.timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, c.timeout)

@@ -10,7 +10,10 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"gotrackfs/internal/track"
 )
+
 
 type mockCutter struct {
 	cutCount int32
@@ -18,7 +21,7 @@ type mockCutter struct {
 	fail     bool
 }
 
-func (m *mockCutter) Cut(ctx context.Context, req TrackRequest, outputPath string) error {
+func (m *mockCutter) Cut(ctx context.Context, req track.Slice, outputPath string) error {
 	atomic.AddInt32(&m.cutCount, 1)
 	if m.delay > 0 {
 		select {
@@ -34,7 +37,7 @@ func (m *mockCutter) Cut(ctx context.Context, req TrackRequest, outputPath strin
 func TestFFmpegCutter_BuildArgs(t *testing.T) {
 	cutter := &FFmpegCutter{binPath: "ffmpeg"}
 
-	req := TrackRequest{
+	req := track.Slice{
 		SourceAudioPath: "/music/album.flac",
 		Start:           65.5,
 		End:             180.25,
@@ -90,7 +93,7 @@ func TestTrackCacheManager_LifecycleAndThunderingHerd(t *testing.T) {
 	}
 	defer mgr.Close()
 
-	req := TrackRequest{
+	req := track.Slice{
 		SourceAudioPath: "/music/test.flac",
 		Start:           0,
 		End:             10,
@@ -178,7 +181,7 @@ func TestTrackCacheManager_CloseCleansUpTempDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req := TrackRequest{
+	req := track.Slice{
 		SourceAudioPath: "/music/test.flac",
 		Start:           0,
 		End:             10,
@@ -205,9 +208,9 @@ func TestTrackCacheManager_CloseCleansUpTempDir(t *testing.T) {
 	}
 }
 
-func TestTrackRequest_KeyDerivesFromSourceFacts(t *testing.T) {
+func TestTrackSlice_KeyDerivesFromSourceFacts(t *testing.T) {
 	now := time.Now()
-	baseReq := TrackRequest{
+	baseReq := track.Slice{
 		SourceAudioPath: "/music/album.flac",
 		SourceModTime:   now,
 		SourceSize:      50 * 1024 * 1024,
@@ -236,29 +239,29 @@ func TestTrackRequest_KeyDerivesFromSourceFacts(t *testing.T) {
 
 	tests := []struct {
 		name   string
-		modify func(r *TrackRequest)
+		modify func(r *track.Slice)
 	}{
-		{"SourceModTime", func(r *TrackRequest) { r.SourceModTime = now.Add(5 * time.Second) }},
-		{"SourceSize", func(r *TrackRequest) { r.SourceSize = 51 * 1024 * 1024 }},
-		{"SourceAudioPath", func(r *TrackRequest) { r.SourceAudioPath = "/music/other.flac" }},
-		{"Start", func(r *TrackRequest) { r.Start = 1.0 }},
-		{"End", func(r *TrackRequest) { r.End = 200.0 }},
-		{"ArtworkPath", func(r *TrackRequest) { r.ArtworkPath = "/music/other.jpg" }},
-		{"Title", func(r *TrackRequest) {
+		{"SourceModTime", func(r *track.Slice) { r.SourceModTime = now.Add(5 * time.Second) }},
+		{"SourceSize", func(r *track.Slice) { r.SourceSize = 51 * 1024 * 1024 }},
+		{"SourceAudioPath", func(r *track.Slice) { r.SourceAudioPath = "/music/other.flac" }},
+		{"Start", func(r *track.Slice) { r.Start = 1.0 }},
+		{"End", func(r *track.Slice) { r.End = 200.0 }},
+		{"ArtworkPath", func(r *track.Slice) { r.ArtworkPath = "/music/other.jpg" }},
+		{"Title", func(r *track.Slice) {
 			r.Tags = make(map[string]string)
 			for k, v := range baseReq.Tags {
 				r.Tags[k] = v
 			}
 			r.Tags["title"] = "Track 2"
 		}},
-		{"Artist", func(r *TrackRequest) {
+		{"Artist", func(r *track.Slice) {
 			r.Tags = make(map[string]string)
 			for k, v := range baseReq.Tags {
 				r.Tags[k] = v
 			}
 			r.Tags["artist"] = "Artist 2"
 		}},
-		{"NewTagComposer", func(r *TrackRequest) {
+		{"NewTagComposer", func(r *track.Slice) {
 			r.Tags = make(map[string]string)
 			for k, v := range baseReq.Tags {
 				r.Tags[k] = v
@@ -305,7 +308,7 @@ func TestFFmpegCutter_GracefulDegradationOnCorruptArtwork(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req := TrackRequest{
+	req := track.Slice{
 		SourceAudioPath: sourceAudio,
 		Start:           0,
 		End:             0.5,
@@ -356,7 +359,7 @@ func TestFFmpegCutter_ConcurrencyAndTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
 
-	err = cutter.Cut(ctx, TrackRequest{}, "/tmp/unused")
+	err = cutter.Cut(ctx, track.Slice{}, "/tmp/unused")
 	if err == nil {
 		t.Errorf("expected error due to timeout waiting for slot, got nil")
 	}
@@ -375,7 +378,7 @@ func TestTrackCacheManager_CancellationWhenAllCallersCancel(t *testing.T) {
 	}
 	defer mgr.Close()
 
-	req := TrackRequest{
+	req := track.Slice{
 		SourceAudioPath: "/music/test.flac",
 		Start:           0,
 		End:             10,
@@ -413,7 +416,7 @@ func TestTrackCacheManager_PartialCancellation(t *testing.T) {
 	}
 	defer mgr.Close()
 
-	req := TrackRequest{
+	req := track.Slice{
 		SourceAudioPath: "/music/test.flac",
 		Start:           0,
 		End:             10,
@@ -464,7 +467,7 @@ type uncancelableSuccessCutter struct {
 	delay time.Duration
 }
 
-func (u *uncancelableSuccessCutter) Cut(ctx context.Context, req TrackRequest, outputPath string) error {
+func (u *uncancelableSuccessCutter) Cut(ctx context.Context, req track.Slice, outputPath string) error {
 	time.Sleep(u.delay)
 	return os.WriteFile(outputPath, []byte("SUCCESS_DATA"), 0644)
 }
@@ -480,7 +483,7 @@ func TestTrackCacheManager_CutSucceedsWhenNoWaitersScheduledTTL(t *testing.T) {
 	}
 	defer mgr.Close()
 
-	req := TrackRequest{
+	req := track.Slice{
 		SourceAudioPath: "/music/orphan.flac",
 		Start:           0,
 		End:             10,

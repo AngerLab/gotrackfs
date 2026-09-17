@@ -11,12 +11,13 @@ import (
 	"sync/atomic"
 	"syscall"
 
-	"gotrackfs/internal/cutter"
+	"gotrackfs/internal/track"
 
 	"github.com/cespare/xxhash/v2"
 	"github.com/winfsp/cgofuse/fuse"
 	"golang.org/x/text/unicode/norm"
 )
+
 
 // inodeFromPath deterministically generates a unique, stable 64-bit inode number from a clean VFS path.
 // Following restic conventions: root is 1, 0 is invalid, and hashes < 2 are remapped to >= 2.
@@ -33,7 +34,7 @@ func inodeFromPath(cleanPath string) uint64 {
 
 // TrackSlicer defines the interface needed by VFS to slice and acquire tracks on-demand.
 type TrackSlicer interface {
-	Acquire(ctx context.Context, key string, req cutter.TrackRequest) (string, error)
+	Acquire(ctx context.Context, key string, req track.Slice) (string, error)
 	Release(key string)
 	GetExisting(key string) (int64, bool)
 	Close() error
@@ -241,7 +242,7 @@ func (v *VFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 	if node.track != nil {
 		// Virtual track entry
 		var st syscall.Stat_t
-		if err := lstatSyscall(node.track.Request.SourceAudioPath, &st); err != nil {
+		if err := lstatSyscall(node.track.Slice.SourceAudioPath, &st); err != nil {
 			return -fuse.ENOENT
 		}
 
@@ -454,7 +455,7 @@ func (v *VFS) Read(path string, buff []byte, ofst int64, fh uint64) int {
 		h.mu.Lock()
 		f = h.file.Load()
 		if f == nil {
-			tempPath, err := v.slicer.Acquire(h.ctx, h.cutterKey, h.track.Request)
+			tempPath, err := v.slicer.Acquire(h.ctx, h.cutterKey, h.track.Slice)
 			if err != nil {
 				h.mu.Unlock()
 				if err != context.Canceled {

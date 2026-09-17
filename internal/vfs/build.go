@@ -11,10 +11,11 @@ import (
 
 	"gotrackfs/internal/audio"
 	"gotrackfs/internal/cue"
-	"gotrackfs/internal/cutter"
+	"gotrackfs/internal/track"
 
 	"golang.org/x/text/unicode/norm"
 )
+
 
 // dirFacts captures directory metadata required for cache validation.
 type dirFacts struct {
@@ -160,7 +161,7 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger) (*Dir
 				Title:         title,
 				Performer:     tr.Performer,
 				EstimatedSize: estimatedSize,
-				Request: cutter.TrackRequest{
+				Slice: track.Slice{
 					SourceAudioPath: audioPath,
 					SourceModTime:   audioFi.ModTime(),
 					SourceSize:      audioFi.Size(),
@@ -213,8 +214,8 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger) (*Dir
 	primaryArtwork := findPrimaryArtwork(parentArtwork)
 	for _, album := range albums {
 		for i := range album.Tracks {
-			album.Tracks[i].Request.ArtworkPath = primaryArtwork
-			album.Tracks[i].CutterKey = album.Tracks[i].Request.Key()
+			album.Tracks[i].Slice.ArtworkPath = primaryArtwork
+			album.Tracks[i].CutterKey = album.Tracks[i].Slice.Key()
 		}
 	}
 

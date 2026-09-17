@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"gotrackfs/internal/track"
 )
 
 // Options holds configuration for TrackCacheManager.
@@ -108,7 +110,7 @@ func (m *TrackCacheManager) GetExisting(key string) (int64, bool) {
 // Acquire requests a track slice with the given cache key. If the track is already cached
 // or currently being cut, it waits for completion and increments the reference count.
 // If all waiting callers cancel their context, the underlying cut operation is aborted.
-func (m *TrackCacheManager) Acquire(ctx context.Context, key string, req TrackRequest) (string, error) {
+func (m *TrackCacheManager) Acquire(ctx context.Context, key string, req track.Slice) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -127,7 +129,7 @@ func (m *TrackCacheManager) Acquire(ctx context.Context, key string, req TrackRe
 	return m.waitForEntry(ctx, key, entry)
 }
 
-func (m *TrackCacheManager) getOrCreateEntry(key string, req TrackRequest) (*trackEntry, bool, error) {
+func (m *TrackCacheManager) getOrCreateEntry(key string, req track.Slice) (*trackEntry, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -168,7 +170,7 @@ func (m *TrackCacheManager) getOrCreateEntry(key string, req TrackRequest) (*tra
 	}
 }
 
-func (m *TrackCacheManager) runCut(ctx context.Context, key string, req TrackRequest, entry *trackEntry, outputPath string) {
+func (m *TrackCacheManager) runCut(ctx context.Context, key string, req track.Slice, entry *trackEntry, outputPath string) {
 	err := m.cutter.Cut(ctx, req, outputPath)
 
 	m.mu.Lock()

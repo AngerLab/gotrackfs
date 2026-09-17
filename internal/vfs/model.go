@@ -2,7 +2,7 @@ package vfs
 
 import (
 	"gotrackfs/internal/cue"
-	"gotrackfs/internal/cutter"
+	"gotrackfs/internal/track"
 )
 
 // VirtualTrack represents a single audio track virtualized from a monolithic audio file.
@@ -14,7 +14,7 @@ type VirtualTrack struct {
 	EstimatedSize int64  // Estimated size in bytes
 	CutterKey     string // Precomputed unique cache key for the slicer
 
-	Request       cutter.TrackRequest // Exact audio facts, timing, artwork and metadata for the slicer
+	Slice track.Slice // Audio slice parameters: offsets, source facts, tags, artwork
 }
 
 // Album represents a parsed album with its virtualized tracks.

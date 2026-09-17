@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -845,3 +846,157 @@ FILE "audio.flac" WAVE
 		t.Errorf("Release(nfdTrack1) returned %d, expected 0", relCode)
 	}
 }
+
+type cancellingMockCutter struct {
+	wasCancelled bool
+	cutDone      chan struct{}
+	mu           sync.Mutex
+}
+
+func (c *cancellingMockCutter) Cut(ctx context.Context, req cutter.TrackRequest, outputPath string) error {
+	defer close(c.cutDone)
+	select {
+	case <-time.After(200 * time.Millisecond):
+		return os.WriteFile(outputPath, []byte("SLOW_DATA"), 0644)
+	case <-ctx.Done():
+		c.mu.Lock()
+		c.wasCancelled = true
+		c.mu.Unlock()
+		return ctx.Err()
+	}
+}
+
+func TestVFS_ReleaseAbortsInFlightCut(t *testing.T) {
+	tmpDir := t.TempDir()
+	albumDir := filepath.Join(tmpDir, "SlowAlbum")
+	if err := os.MkdirAll(albumDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cueContent := `TITLE "Slow Album"
+FILE "slow.flac" WAVE
+  TRACK 01 AUDIO
+    TITLE "Slow Track"
+    INDEX 01 00:00:00
+`
+	if err := os.WriteFile(filepath.Join(albumDir, "slow.cue"), []byte(cueContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(albumDir, "slow.flac"), make([]byte, 512), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mock := &cancellingMockCutter{cutDone: make(chan struct{})}
+	mgr, err := cutter.NewManager(cutter.Options{
+		Cutter: mock,
+		TTL:    1 * time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	v := New(Options{
+		SourceRoot: tmpDir,
+		Slicer:     mgr,
+	})
+	defer v.Destroy()
+
+	code, fh := v.Open("/SlowAlbum/01. Slow Track.flac", fuse.O_RDONLY)
+	if code != 0 {
+		t.Fatalf("Open failed: %d", code)
+	}
+
+	readDone := make(chan int)
+	buf := make([]byte, 16)
+	go func() {
+		n := v.Read("/SlowAlbum/01. Slow Track.flac", buf, 0, fh)
+		readDone <- n
+	}()
+
+	// Allow Read to reach Acquire and start cutting
+	time.Sleep(20 * time.Millisecond)
+
+	// Release handle while Read is still in flight
+	v.Release("/SlowAlbum/01. Slow Track.flac", fh)
+
+	n := <-readDone
+	if n >= 0 {
+		t.Errorf("expected Read to fail with negative code upon cancellation, got %d", n)
+	}
+
+	// Wait for the background cutter goroutine to handle ctx.Done()
+	select {
+	case <-mock.cutDone:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("timed out waiting for mock cutter goroutine to finish")
+	}
+
+	mock.mu.Lock()
+	cancelled := mock.wasCancelled
+	mock.mu.Unlock()
+
+	if !cancelled {
+		t.Errorf("expected cutter to observe context cancellation upon Release, but it did not")
+	}
+}
+
+func TestVFS_ConcurrentReadRaceCondition(t *testing.T) {
+	tmpDir := t.TempDir()
+	albumDir := filepath.Join(tmpDir, "RaceAlbum")
+	if err := os.MkdirAll(albumDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cueContent := `TITLE "Race Album"
+FILE "race.flac" WAVE
+  TRACK 01 AUDIO
+    TITLE "Race Track"
+    INDEX 01 00:00:00
+`
+	if err := os.WriteFile(filepath.Join(albumDir, "race.cue"), []byte(cueContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(albumDir, "race.flac"), make([]byte, 512), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mock := &testMockCutter{}
+	mgr, err := cutter.NewManager(cutter.Options{
+		Cutter: mock,
+		TTL:    1 * time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	v := New(Options{
+		SourceRoot: tmpDir,
+		Slicer:     mgr,
+	})
+	defer v.Destroy()
+
+	code, fh := v.Open("/RaceAlbum/01. Race Track.flac", fuse.O_RDONLY)
+	if code != 0 {
+		t.Fatalf("Open failed: %d", code)
+	}
+
+	const concurrentReaders = 20
+	var wg sync.WaitGroup
+	wg.Add(concurrentReaders)
+
+	for i := 0; i < concurrentReaders; i++ {
+		go func(offset int64) {
+			defer wg.Done()
+			buf := make([]byte, 16)
+			n := v.Read("/RaceAlbum/01. Race Track.flac", buf, offset, fh)
+			if n <= 0 {
+				t.Errorf("concurrent read at offset %d returned %d", offset, n)
+			}
+		}(int64(i % 5))
+	}
+
+	wg.Wait()
+	v.Release("/RaceAlbum/01. Race Track.flac", fh)
+}
+
+

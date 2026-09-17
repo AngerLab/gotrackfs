@@ -76,8 +76,8 @@ func (c *FFmpegCutter) BuildArgs(req TrackRequest, outputPath string) []string {
 		args = append(args, "-c:v", "copy", "-disposition:v:0", "attached_pic")
 	}
 
-	// Output codec: FLAC
-	args = append(args, "-c:a", "flac")
+	// Output codec: FLAC with fast compression
+	args = append(args, "-c:a", "flac", "-compression_level", "1")
 
 	// Metadata tags (sorted deterministically)
 	if len(req.Tags) > 0 {
@@ -122,6 +122,10 @@ func (c *FFmpegCutter) Cut(ctx context.Context, req TrackRequest, outputPath str
 	cmd := exec.CommandContext(ctx, c.binPath, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		if ctx.Err() != nil {
+			_ = os.Remove(outputPath)
+			return ctx.Err()
+		}
 		if req.ArtworkPath != "" {
 			c.logger.Warn("ffmpeg: cut with artwork failed, retrying without artwork",
 				"source", req.SourceAudioPath,
@@ -138,6 +142,10 @@ func (c *FFmpegCutter) Cut(ctx context.Context, req TrackRequest, outputPath str
 			fallbackOutput, fallbackErr := fallbackCmd.CombinedOutput()
 			if fallbackErr == nil {
 				return nil
+			}
+			if ctx.Err() != nil {
+				_ = os.Remove(outputPath)
+				return ctx.Err()
 			}
 
 			c.logger.Error("ffmpeg cut failed (both with and without artwork)",

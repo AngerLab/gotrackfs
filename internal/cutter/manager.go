@@ -19,12 +19,14 @@ type Options struct {
 }
 
 type trackEntry struct {
-	path     string
-	done     chan struct{}
-	err      error
-	refCount int
-	lastUsed time.Time
-	timer    *time.Timer
+	path          string
+	done          chan struct{}
+	err           error
+	activeWaiters int
+	refCount      int
+	lastUsed      time.Time
+	timer         *time.Timer
+	cancelCut     context.CancelFunc
 }
 
 // TrackCacheManager manages cached slices of monolithic audio tracks with reference counting and TTL cleanup.
@@ -105,66 +107,141 @@ func (m *TrackCacheManager) GetExisting(key string) (int64, bool) {
 
 // Acquire requests a track slice with the given cache key. If the track is already cached
 // or currently being cut, it waits for completion and increments the reference count.
+// If all waiting callers cancel their context, the underlying cut operation is aborted.
 func (m *TrackCacheManager) Acquire(ctx context.Context, key string, req TrackRequest) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if key == "" {
 		key = req.Key()
 	}
 
+	entry, isReady, err := m.getOrCreateEntry(key, req)
+	if err != nil {
+		return "", err
+	}
+	if isReady {
+		return entry.path, nil
+	}
+
+	return m.waitForEntry(ctx, key, entry)
+}
+
+func (m *TrackCacheManager) getOrCreateEntry(key string, req TrackRequest) (*trackEntry, bool, error) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	if m.closed {
-		m.mu.Unlock()
-		return "", fmt.Errorf("cutter cache manager is closed")
+		return nil, false, fmt.Errorf("cutter cache manager is closed")
 	}
 
 	entry, exists := m.entries[key]
-	if exists {
+	if !exists {
+		outputPath := filepath.Join(m.tempDir, fmt.Sprintf("%s.flac", key))
+		cutCtx, cutCancel := context.WithCancel(context.Background())
+		entry = &trackEntry{
+			path:          outputPath,
+			done:          make(chan struct{}),
+			activeWaiters: 1,
+			cancelCut:     cutCancel,
+		}
+		m.entries[key] = entry
+		go m.runCut(cutCtx, key, req, entry, outputPath)
+		return entry, false, nil
+	}
+
+	if entry.timer != nil {
+		entry.timer.Stop()
+		entry.timer = nil
+	}
+
+	select {
+	case <-entry.done:
+		if entry.err != nil {
+			return nil, false, entry.err
+		}
+		entry.refCount++
+		return entry, true, nil
+	default:
+		entry.activeWaiters++
+		return entry, false, nil
+	}
+}
+
+func (m *TrackCacheManager) runCut(ctx context.Context, key string, req TrackRequest, entry *trackEntry, outputPath string) {
+	err := m.cutter.Cut(ctx, req, outputPath)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	entry.err = err
+	if err != nil {
+		delete(m.entries, key)
+		_ = os.Remove(outputPath)
+	} else if entry.refCount == 0 && entry.activeWaiters <= 0 {
+		m.scheduleTTLTimerLocked(key, entry)
+	}
+	close(entry.done)
+}
+
+func (m *TrackCacheManager) waitForEntry(ctx context.Context, key string, entry *trackEntry) (string, error) {
+	select {
+	case <-entry.done:
+		m.mu.Lock()
+		defer m.mu.Unlock()
+
+		entry.activeWaiters--
+		if entry.err != nil {
+			return "", entry.err
+		}
 		if entry.timer != nil {
 			entry.timer.Stop()
 			entry.timer = nil
 		}
 		entry.refCount++
-		m.mu.Unlock()
+		return entry.path, nil
 
+	case <-ctx.Done():
+		m.mu.Lock()
+		defer m.mu.Unlock()
+
+		m.cancelWaiterLocked(key, entry)
+		return "", ctx.Err()
+	}
+}
+
+func (m *TrackCacheManager) cancelWaiterLocked(key string, entry *trackEntry) {
+	entry.activeWaiters--
+	if entry.activeWaiters <= 0 {
+		if entry.cancelCut != nil {
+			entry.cancelCut()
+			entry.cancelCut = nil
+		}
 		select {
 		case <-entry.done:
-		case <-ctx.Done():
-			m.Release(key)
-			return "", ctx.Err()
+			if entry.err == nil && entry.refCount == 0 {
+				m.scheduleTTLTimerLocked(key, entry)
+			}
+		default:
 		}
+	}
+}
 
-		if entry.err != nil {
-			m.Release(key)
-			return "", entry.err
+func (m *TrackCacheManager) scheduleTTLTimerLocked(key string, entry *trackEntry) {
+	if entry.timer != nil {
+		return
+	}
+	entry.lastUsed = time.Now()
+	entry.timer = time.AfterFunc(m.ttl, func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+
+		if e, stillExists := m.entries[key]; stillExists && e.refCount == 0 {
+			delete(m.entries, key)
+			_ = os.Remove(e.path)
+			m.logger.Debug("cutter: removed expired cached track", "key", key, "path", e.path)
 		}
-		return entry.path, nil
-	}
-
-	outputPath := filepath.Join(m.tempDir, fmt.Sprintf("%s.flac", key))
-	entry = &trackEntry{
-		path:     outputPath,
-		done:     make(chan struct{}),
-		refCount: 1,
-		lastUsed: time.Now(),
-	}
-	m.entries[key] = entry
-	m.mu.Unlock()
-
-	// Execute cutter without holding manager lock
-	err := m.cutter.Cut(ctx, req, outputPath)
-
-	m.mu.Lock()
-	entry.err = err
-	close(entry.done)
-
-	if err != nil {
-		delete(m.entries, key)
-		_ = os.Remove(outputPath)
-		m.mu.Unlock()
-		return "", err
-	}
-	m.mu.Unlock()
-
-	return outputPath, nil
+	})
 }
 
 // Release decrements the reference count for a track key. When the count drops to 0,
@@ -181,18 +258,7 @@ func (m *TrackCacheManager) Release(key string) {
 	entry.refCount--
 	if entry.refCount <= 0 {
 		entry.refCount = 0
-		entry.lastUsed = time.Now()
-
-		entry.timer = time.AfterFunc(m.ttl, func() {
-			m.mu.Lock()
-			defer m.mu.Unlock()
-
-			if e, stillExists := m.entries[key]; stillExists && e.refCount == 0 {
-				delete(m.entries, key)
-				_ = os.Remove(e.path)
-				m.logger.Debug("cutter: removed expired cached track", "key", key, "path", e.path)
-			}
-		})
+		m.scheduleTTLTimerLocked(key, entry)
 	}
 }
 
@@ -207,6 +273,11 @@ func (m *TrackCacheManager) Close() error {
 	for _, entry := range m.entries {
 		if entry.timer != nil {
 			entry.timer.Stop()
+			entry.timer = nil
+		}
+		if entry.cancelCut != nil {
+			entry.cancelCut()
+			entry.cancelCut = nil
 		}
 	}
 	m.entries = make(map[string]*trackEntry)

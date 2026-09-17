@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"gotrackfs/internal/cutter"
@@ -34,9 +35,11 @@ type Options struct {
 }
 
 type fileHandle struct {
-	file      *os.File
+	file      atomic.Pointer[os.File]
 	cutterKey string // non-empty if acquired via cutter
 	track     *VirtualTrack
+	ctx       context.Context
+	cancel    context.CancelFunc
 	mu        sync.Mutex
 }
 
@@ -375,12 +378,15 @@ func (v *VFS) Open(path string, flags int) (int, uint64) {
 			return -fuse.ENOSYS, ^uint64(0)
 		}
 
+		ctx, cancel := context.WithCancel(context.Background())
 		v.mu.Lock()
 		v.nextHandle++
 		fh := v.nextHandle
 		v.openFiles[fh] = &fileHandle{
 			cutterKey: node.track.CutterKey,
 			track:     node.track,
+			ctx:       ctx,
+			cancel:    cancel,
 		}
 		v.mu.Unlock()
 
@@ -400,10 +406,13 @@ func (v *VFS) Open(path string, flags int) (int, uint64) {
 		return -fuse.EISDIR, ^uint64(0)
 	}
 
+	h := &fileHandle{}
+	h.file.Store(f)
+
 	v.mu.Lock()
 	v.nextHandle++
 	fh := v.nextHandle
-	v.openFiles[fh] = &fileHandle{file: f}
+	v.openFiles[fh] = h
 	v.mu.Unlock()
 
 	return 0, fh
@@ -418,33 +427,38 @@ func (v *VFS) Read(path string, buff []byte, ofst int64, fh uint64) int {
 		return -fuse.EBADF
 	}
 
-	if h.file == nil {
+	f := h.file.Load()
+	if f == nil {
 		if h.track == nil {
 			return -fuse.EBADF
 		}
 
 		// Lazy slice on first Read!
 		h.mu.Lock()
-		if h.file == nil {
-			tempPath, err := v.slicer.Acquire(context.Background(), h.cutterKey, h.track.Request)
+		f = h.file.Load()
+		if f == nil {
+			tempPath, err := v.slicer.Acquire(h.ctx, h.cutterKey, h.track.Request)
 			if err != nil {
 				h.mu.Unlock()
-				v.logger.Error("vfs: failed to slice audio track", "track", h.track.FileName, "error", err)
+				if err != context.Canceled {
+					v.logger.Error("vfs: failed to slice audio track", "track", h.track.FileName, "error", err)
+				}
 				return -fuse.EIO
 			}
 
-			f, err := os.Open(tempPath)
+			openedFile, err := os.Open(tempPath)
 			if err != nil {
 				v.slicer.Release(h.cutterKey)
 				h.mu.Unlock()
 				return -fuse.EIO
 			}
-			h.file = f
+			h.file.Store(openedFile)
+			f = openedFile
 		}
 		h.mu.Unlock()
 	}
 
-	n, err := h.file.ReadAt(buff, ofst)
+	n, err := f.ReadAt(buff, ofst)
 	if err != nil && err != io.EOF {
 		return -fuse.EIO
 	}
@@ -465,9 +479,14 @@ func (v *VFS) Release(path string, fh uint64) int {
 	v.mu.Unlock()
 
 	if ok && h != nil {
+		if h.cancel != nil {
+			h.cancel()
+		}
+
 		h.mu.Lock()
-		if h.file != nil {
-			_ = h.file.Close()
+		f := h.file.Swap(nil)
+		if f != nil {
+			_ = f.Close()
 			if h.cutterKey != "" && v.slicer != nil {
 				v.slicer.Release(h.cutterKey)
 			}

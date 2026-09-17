@@ -70,6 +70,8 @@ func TestFFmpegCutter_BuildArgs(t *testing.T) {
 	assertArgContains("attached_pic")
 	assertArgContains("-c:a")
 	assertArgContains("flac")
+	assertArgContains("-compression_level")
+	assertArgContains("1")
 	assertArgContains("-metadata")
 	assertArgContains("title=Time")
 	assertArgContains("track=4")
@@ -360,5 +362,155 @@ func TestFFmpegCutter_ConcurrencyAndTimeout(t *testing.T) {
 	}
 	// Release slot
 	<-cutter.sem
+}
+
+func TestTrackCacheManager_CancellationWhenAllCallersCancel(t *testing.T) {
+	mock := &mockCutter{delay: 100 * time.Millisecond}
+	mgr, err := NewManager(Options{
+		Cutter: mock,
+		TTL:    1 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	defer mgr.Close()
+
+	req := TrackRequest{
+		SourceAudioPath: "/music/test.flac",
+		Start:           0,
+		End:             10,
+		Tags:            map[string]string{"title": "Cancel Track"},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	outputPath, err := mgr.Acquire(ctx, req.Key(), req)
+	if err == nil {
+		t.Fatalf("expected error from cancelled context, got path %s", outputPath)
+	}
+	if err != context.DeadlineExceeded && err != context.Canceled {
+		t.Errorf("expected context cancellation error, got %v", err)
+	}
+
+	// Give the mock goroutine a moment to observe the cancellation and clean up
+	time.Sleep(30 * time.Millisecond)
+
+	expectedPath := filepath.Join(mgr.TempDir(), req.Key()+".flac")
+	if _, err := os.Stat(expectedPath); !os.IsNotExist(err) {
+		t.Errorf("expected temp file to be removed upon cancellation, but it exists: %s", expectedPath)
+	}
+}
+
+func TestTrackCacheManager_PartialCancellation(t *testing.T) {
+	mock := &mockCutter{delay: 60 * time.Millisecond}
+	mgr, err := NewManager(Options{
+		Cutter: mock,
+		TTL:    1 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	defer mgr.Close()
+
+	req := TrackRequest{
+		SourceAudioPath: "/music/test.flac",
+		Start:           0,
+		End:             10,
+		Tags:            map[string]string{"title": "Partial Cancel Track"},
+	}
+
+	// Caller 1 cancels early
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel1()
+
+	// Caller 2 waits for full completion
+	ctx2 := context.Background()
+
+	var wg sync.WaitGroup
+	var path1, path2 string
+	var err1, err2 error
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		path1, err1 = mgr.Acquire(ctx1, req.Key(), req)
+	}()
+
+	// Slight offset so caller 1 initializes the cut
+	time.Sleep(5 * time.Millisecond)
+
+	go func() {
+		defer wg.Done()
+		path2, err2 = mgr.Acquire(ctx2, req.Key(), req)
+	}()
+
+	wg.Wait()
+
+	if err1 == nil {
+		t.Errorf("caller 1 should have failed due to timeout, got path %s", path1)
+	}
+	if err2 != nil {
+		t.Errorf("caller 2 should have succeeded despite caller 1 cancelling, got err: %v", err2)
+	}
+	if path2 == "" {
+		t.Errorf("caller 2 should have received a valid path")
+	}
+
+	mgr.Release(req.Key())
+}
+
+type uncancelableSuccessCutter struct {
+	delay time.Duration
+}
+
+func (u *uncancelableSuccessCutter) Cut(ctx context.Context, req TrackRequest, outputPath string) error {
+	time.Sleep(u.delay)
+	return os.WriteFile(outputPath, []byte("SUCCESS_DATA"), 0644)
+}
+
+func TestTrackCacheManager_CutSucceedsWhenNoWaitersScheduledTTL(t *testing.T) {
+	mock := &uncancelableSuccessCutter{delay: 40 * time.Millisecond}
+	mgr, err := NewManager(Options{
+		Cutter: mock,
+		TTL:    50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	defer mgr.Close()
+
+	req := TrackRequest{
+		SourceAudioPath: "/music/orphan.flac",
+		Start:           0,
+		End:             10,
+		Tags:            map[string]string{"title": "Orphan Test"},
+	}
+
+	// Caller cancels early
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	_, err = mgr.Acquire(ctx, req.Key(), req)
+	if err == nil {
+		t.Fatal("expected error from caller cancellation")
+	}
+
+	// Wait for cut goroutine to finish (40ms)
+	time.Sleep(50 * time.Millisecond)
+
+	expectedPath := filepath.Join(mgr.TempDir(), req.Key()+".flac")
+	// The file should exist because cut succeeded
+	if _, statErr := os.Stat(expectedPath); os.IsNotExist(statErr) {
+		t.Fatalf("expected file to exist after successful cut even if waiter cancelled")
+	}
+
+	// Now wait for TTL timer (50ms + margin)
+	time.Sleep(70 * time.Millisecond)
+
+	// File MUST be deleted by TTL timer!
+	if _, statErr := os.Stat(expectedPath); !os.IsNotExist(statErr) {
+		t.Fatalf("file leaked in cache: still exists after TTL expiration: %s", expectedPath)
+	}
 }
 

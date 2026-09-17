@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/winfsp/cgofuse/fuse"
 )
@@ -218,5 +219,61 @@ FILE "CD2.flac" WAVE
 	}
 	if code := v.Getattr("/TheWall/2-01. Hey You.flac", &st, 0); code != 0 {
 		t.Errorf("Getattr CD2 track failed: %d", code)
+	}
+}
+
+func TestVFS_AudioModificationInvalidatesCache(t *testing.T) {
+	tmpDir := t.TempDir()
+	albumDir := filepath.Join(tmpDir, "SingleAlbum")
+	if err := os.MkdirAll(albumDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cueContent := `TITLE "Album"
+FILE "audio.flac" WAVE
+  TRACK 01 AUDIO
+    TITLE "Track 1"
+    INDEX 01 00:00:00
+  TRACK 02 AUDIO
+    TITLE "Track 2"
+    INDEX 01 02:00:00`
+
+	cuePath := filepath.Join(albumDir, "album.cue")
+	audioPath := filepath.Join(albumDir, "audio.flac")
+
+	if err := os.WriteFile(cuePath, []byte(cueContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Initial 10MB audio
+	if err := os.WriteFile(audioPath, make([]byte, 10*1024*1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	v := New(Options{SourceRoot: tmpDir})
+
+	var st1 fuse.Stat_t
+	if code := v.Getattr("/SingleAlbum/01. Track 1.flac", &st1, 0); code != 0 {
+		t.Fatalf("first Getattr failed: %d", code)
+	}
+
+	// Now replace audio file with 20MB content and new mtime, without touching album.cue
+	newAudioData := make([]byte, 20*1024*1024)
+	if err := os.WriteFile(audioPath, newAudioData, 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Ensure mtime is different
+	newMtime := time.Now().Add(2 * time.Second)
+	_ = os.Chtimes(audioPath, newMtime, newMtime)
+
+	var st2 fuse.Stat_t
+	if code := v.Getattr("/SingleAlbum/01. Track 1.flac", &st2, 0); code != 0 {
+		t.Fatalf("second Getattr failed: %d", code)
+	}
+
+	if st2.Size == st1.Size {
+		t.Errorf("expected estimated size to update after audio modification (old=%d, new=%d)", st1.Size, st2.Size)
+	}
+	if st2.Size <= st1.Size {
+		t.Errorf("expected new size to be larger (old=%d, new=%d)", st1.Size, st2.Size)
 	}
 }

@@ -47,9 +47,11 @@ type AlbumCache struct {
 }
 
 type cachedDir struct {
-	cueModTimes map[string]time.Time // cuePath -> modTime
-	cueSizes    map[string]int64     // cuePath -> size
-	state       *DirState
+	cueModTimes   map[string]time.Time // cuePath -> modTime
+	cueSizes      map[string]int64     // cuePath -> size
+	audioModTimes map[string]time.Time // audioPath -> modTime
+	audioSizes    map[string]int64     // audioPath -> size
+	state         *DirState
 }
 
 func NewAlbumCache() *AlbumCache {
@@ -216,11 +218,22 @@ func (c *AlbumCache) GetDirState(dirPath string) (*DirState, error) {
 		}
 	}
 
+	audioModTimes := make(map[string]time.Time, len(albums))
+	audioSizes := make(map[string]int64, len(albums))
+	for _, album := range albums {
+		if fi, err := os.Stat(album.SourceAudioPath); err == nil {
+			audioModTimes[album.SourceAudioPath] = fi.ModTime()
+			audioSizes[album.SourceAudioPath] = fi.Size()
+		}
+	}
+
 	c.mu.Lock()
 	c.dirs[dirPath] = &cachedDir{
-		cueModTimes: currentModTimes,
-		cueSizes:    currentSizes,
-		state:       dirState,
+		cueModTimes:   currentModTimes,
+		cueSizes:      currentSizes,
+		audioModTimes: audioModTimes,
+		audioSizes:    audioSizes,
+		state:         dirState,
 	}
 	c.mu.Unlock()
 
@@ -237,6 +250,13 @@ func isCacheValid(cached *cachedDir, currentModTimes map[string]time.Time, curre
 			return false
 		}
 		if cached.cueSizes[cp] != currentSizes[cp] {
+			return false
+		}
+	}
+	// Check underlying audio files for mtime or size changes
+	for audioPath, oldMtime := range cached.audioModTimes {
+		fi, err := os.Stat(audioPath)
+		if err != nil || !fi.ModTime().Equal(oldMtime) || fi.Size() != cached.audioSizes[audioPath] {
 			return false
 		}
 	}

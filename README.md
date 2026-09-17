@@ -46,13 +46,7 @@ SOURCE/Artist/Album/           VIRTUAL/Artist/Album/
 ## Install
 
 Grab a prebuilt binary from [Releases](https://github.com/AngerLab/gotrackfs/releases)
-(`darwin-arm64`, `darwin-amd64`, `linux-amd64`, `linux-arm64`), or:
-
-```sh
-go install github.com/AngerLab/gotrackfs/cmd/gotrackfs@latest
-```
-
-or from source:
+(`darwin-arm64`, `darwin-amd64`, `linux-amd64`, `linux-arm64`), or build from source:
 
 ```sh
 git clone https://github.com/AngerLab/gotrackfs && cd gotrackfs && make install

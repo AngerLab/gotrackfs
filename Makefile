@@ -1,6 +1,5 @@
 BIN      := gotrackfs
 MODULE   := github.com/AngerLab/gotrackfs
-VERSION  ?= dev
 
 # cgofuse builds against libfuse2 by default; use libfuse3 on Linux
 ifeq ($(shell uname),Linux)
@@ -19,7 +18,7 @@ race:
 	go test -race $(GO_TAGS) ./...
 
 install:
-	go install $(MODULE)/cmd/gotrackfs@$(VERSION)
+	go build $(GO_TAGS) -trimpath -ldflags "-s -w" -o "$$(go env GOPATH)/bin/$(BIN)" ./cmd/gotrackfs
 
 clean:
 	rm -f $(BIN)

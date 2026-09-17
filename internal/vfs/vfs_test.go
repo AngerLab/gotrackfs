@@ -12,13 +12,12 @@ import (
 	"testing"
 	"time"
 
-	"gotrackfs/internal/cutter"
-	"gotrackfs/internal/track"
+	"github.com/AngerLab/gotrackfs/internal/cutter"
+	"github.com/AngerLab/gotrackfs/internal/track"
 
 	"github.com/winfsp/cgofuse/fuse"
 	"golang.org/x/text/unicode/norm"
 )
-
 
 func TestVFS_VirtualTrackListingAndAttributes(t *testing.T) {
 	// Create test structure in temp dir
@@ -1217,7 +1216,3 @@ FILE "audio.flac" WAVE
 		t.Errorf("read content mismatch: got %q, want %q", string(readBuf), string(coverData))
 	}
 }
-
-
-
-

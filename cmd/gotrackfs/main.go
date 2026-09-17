@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"gotrackfs/internal/cutter"
-	"gotrackfs/internal/vfs"
+	"github.com/AngerLab/gotrackfs/internal/cutter"
+	"github.com/AngerLab/gotrackfs/internal/vfs"
 
 	"github.com/winfsp/cgofuse/fuse"
 )
@@ -33,8 +33,8 @@ func main() {
 	slog.SetDefault(logger)
 
 	args := flag.Args()
-	sourceDir := ".playground/SOURCE"
-	mountPoint := ".playground/VIRTUAL"
+	sourceDir := "SOURCE"
+	mountPoint := "VIRTUAL"
 
 	if len(args) >= 1 {
 		sourceDir = args[0]

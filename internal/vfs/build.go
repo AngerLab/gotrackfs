@@ -9,13 +9,12 @@ import (
 	"strings"
 	"time"
 
-	"gotrackfs/internal/audio"
-	"gotrackfs/internal/cue"
-	"gotrackfs/internal/track"
+	"github.com/AngerLab/gotrackfs/internal/audio"
+	"github.com/AngerLab/gotrackfs/internal/cue"
+	"github.com/AngerLab/gotrackfs/internal/track"
 
 	"golang.org/x/text/unicode/norm"
 )
-
 
 // dirFacts captures directory metadata required for cache validation.
 type dirFacts struct {

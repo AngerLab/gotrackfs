@@ -3,7 +3,7 @@ package vfs
 import (
 	"testing"
 
-	"gotrackfs/internal/cue"
+	"github.com/AngerLab/gotrackfs/internal/cue"
 )
 
 func TestSanitizeFilename(t *testing.T) {

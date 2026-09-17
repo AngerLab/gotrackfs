@@ -1,8 +1,8 @@
 package vfs
 
 import (
-	"gotrackfs/internal/cue"
-	"gotrackfs/internal/track"
+	"github.com/AngerLab/gotrackfs/internal/cue"
+	"github.com/AngerLab/gotrackfs/internal/track"
 )
 
 // VirtualTrack represents a single audio track virtualized from a monolithic audio file.

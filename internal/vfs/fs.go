@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"syscall"
 
-	"gotrackfs/internal/track"
+	"github.com/AngerLab/gotrackfs/internal/track"
 
 	"github.com/cespare/xxhash/v2"
 	"github.com/winfsp/cgofuse/fuse"

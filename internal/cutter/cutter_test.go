@@ -11,9 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"gotrackfs/internal/track"
+	"github.com/AngerLab/gotrackfs/internal/track"
 )
-
 
 type mockCutter struct {
 	cutCount int32
@@ -516,4 +515,3 @@ func TestTrackCacheManager_CutSucceedsWhenNoWaitersScheduledTTL(t *testing.T) {
 		t.Fatalf("file leaked in cache: still exists after TTL expiration: %s", expectedPath)
 	}
 }
-

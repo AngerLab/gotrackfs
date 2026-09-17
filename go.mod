@@ -1,4 +1,4 @@
-module gotrackfs
+module github.com/AngerLab/gotrackfs
 
 go 1.27.1
 

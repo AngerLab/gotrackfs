@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"gotrackfs/internal/track"
+	"github.com/AngerLab/gotrackfs/internal/track"
 )
 
 // Options holds configuration for TrackCacheManager.

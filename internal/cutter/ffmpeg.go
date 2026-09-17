@@ -9,7 +9,7 @@ import (
 	"slices"
 	"time"
 
-	"gotrackfs/internal/track"
+	"github.com/AngerLab/gotrackfs/internal/track"
 )
 
 // Cutter defines the interface for slicing an audio track into an output file.

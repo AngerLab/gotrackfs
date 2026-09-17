@@ -39,7 +39,8 @@ SOURCE/Artist/Album/           VIRTUAL/Artist/Album/
 ## Requirements
 
 - [ffmpeg](https://ffmpeg.org) in `PATH` (runtime only; not needed to build)
-- **macOS**: [macFUSE](https://osxfuse.github.io/) installed
+- **macOS**: [FUSE-T](https://github.com/macos-fuse-t/fuse-t) (recommended — no kernel
+  extension, works on Apple Silicon; macFUSE is also supported)
 - **Linux**: FUSE 3 (`fuse3` / `libfuse3-dev` package)
 
 ## Install

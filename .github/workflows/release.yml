@@ -34,6 +34,7 @@ jobs:
 
       - name: Build
         env:
+          CGO_ENABLED: 1
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           # cgofuse builds against libfuse2 by default; use libfuse3 on Linux

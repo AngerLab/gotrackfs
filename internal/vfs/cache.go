@@ -4,6 +4,8 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // AlbumCache caches parsed directory states to prevent re-parsing on every FUSE call.
@@ -31,6 +33,7 @@ func NewAlbumCache(logger *slog.Logger) *AlbumCache {
 
 // GetDirState returns the DirState for dirPath, or parses it if needed.
 func (c *AlbumCache) GetDirState(dirPath string) (*DirState, error) {
+	dirPath = norm.NFC.String(dirPath)
 	dirFi, err := os.Stat(dirPath)
 	if err != nil {
 		return nil, err

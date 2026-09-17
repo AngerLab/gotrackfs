@@ -325,3 +325,40 @@ func TestFFmpegCutter_GracefulDegradationOnCorruptArtwork(t *testing.T) {
 		t.Errorf("expected non-empty output file")
 	}
 }
+
+func TestFFmpegCutter_ConcurrencyAndTimeout(t *testing.T) {
+	cutter, err := NewFFmpegCutter("", nil)
+	if err != nil {
+		t.Skipf("ffmpeg not installed: %v", err)
+	}
+
+	// Verify defaults
+	if cap(cutter.sem) != 2 {
+		t.Errorf("expected default sem cap 2, got %d", cap(cutter.sem))
+	}
+	if cutter.timeout != 60*time.Second {
+		t.Errorf("expected default timeout 60s, got %v", cutter.timeout)
+	}
+
+	// Test SetMaxConcurrency
+	cutter.SetMaxConcurrency(4)
+	if cap(cutter.sem) != 4 {
+		t.Errorf("expected sem cap 4, got %d", cap(cutter.sem))
+	}
+
+	// Test timeout expiration on cancelled context
+	cutter.SetMaxConcurrency(1)
+	// Fill the slot
+	cutter.sem <- struct{}{}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	err = cutter.Cut(ctx, TrackRequest{}, "/tmp/unused")
+	if err == nil {
+		t.Errorf("expected error due to timeout waiting for slot, got nil")
+	}
+	// Release slot
+	<-cutter.sem
+}
+

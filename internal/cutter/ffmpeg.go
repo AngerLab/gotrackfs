@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"time"
 )
 
 // Cutter defines the interface for slicing an audio track into an output file.
@@ -18,6 +19,8 @@ type Cutter interface {
 type FFmpegCutter struct {
 	binPath string
 	logger  *slog.Logger
+	sem     chan struct{}
+	timeout time.Duration
 }
 
 // NewFFmpegCutter creates a new FFmpegCutter. If binPath is empty, it searches for "ffmpeg" in PATH.
@@ -35,7 +38,22 @@ func NewFFmpegCutter(binPath string, logger *slog.Logger) (*FFmpegCutter, error)
 	return &FFmpegCutter{
 		binPath: binPath,
 		logger:  logger,
+		sem:     make(chan struct{}, 2), // Default: max 2 concurrent ffmpeg cuts
+		timeout: 60 * time.Second,       // Default: 60s timeout per cut
 	}, nil
+}
+
+// SetMaxConcurrency configures the maximum concurrent ffmpeg cut operations.
+func (c *FFmpegCutter) SetMaxConcurrency(n int) {
+	if n <= 0 {
+		n = 1
+	}
+	c.sem = make(chan struct{}, n)
+}
+
+// SetTimeout configures the timeout for ffmpeg cut operations.
+func (c *FFmpegCutter) SetTimeout(d time.Duration) {
+	c.timeout = d
 }
 
 // BuildArgs constructs the CLI arguments for ffmpeg.
@@ -83,6 +101,21 @@ func (c *FFmpegCutter) BuildArgs(req TrackRequest, outputPath string) []string {
 // If embedding artwork fails (e.g. corrupt or unsupported image format),
 // it logs a warning and gracefully retries cutting audio without artwork.
 func (c *FFmpegCutter) Cut(ctx context.Context, req TrackRequest, outputPath string) error {
+	if c.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.timeout)
+		defer cancel()
+	}
+
+	if c.sem != nil {
+		select {
+		case c.sem <- struct{}{}:
+			defer func() { <-c.sem }()
+		case <-ctx.Done():
+			return fmt.Errorf("ffmpeg cut waiting for slot: %w", ctx.Err())
+		}
+	}
+
 	args := c.BuildArgs(req, outputPath)
 	c.logger.Debug("ffmpeg: starting track cut", "source", req.SourceAudioPath, "start", req.Start, "end", req.End, "output", outputPath)
 

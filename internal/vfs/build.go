@@ -9,8 +9,11 @@ import (
 	"strings"
 	"time"
 
+	"gotrackfs/internal/audio"
 	"gotrackfs/internal/cue"
 	"gotrackfs/internal/cutter"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // dirFacts captures file metadata (mtimes and sizes) required for cache validation.
@@ -94,19 +97,34 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger) (*Dir
 		}
 		claimedAudios[audioPath] = true
 
+		totalAudioDuration, durErr := audio.ProbeDuration(audioPath)
+		if durErr != nil {
+			logger.Debug("vfs: failed to probe audio duration from header", "audio", audioPath, "error", durErr)
+		}
+
+		totalAudioSize := audioFi.Size()
+		totalKnownDuration := totalAudioDuration
+		if totalKnownDuration <= 0 {
+			for _, tr := range tracks {
+				if tr.End > tr.Start {
+					totalKnownDuration += (tr.End - tr.Start)
+				}
+			}
+		} else {
+			// If total duration is known from header, populate the last track's End time if missing
+			if len(tracks) > 0 {
+				lastIdx := len(tracks) - 1
+				if tracks[lastIdx].End <= tracks[lastIdx].Start && totalAudioDuration > tracks[lastIdx].Start {
+					tracks[lastIdx].End = totalAudioDuration
+				}
+			}
+		}
+
 		album := &Album{
 			CuePath:         cuePath,
 			SourceAudioPath: audioPath,
 			Sheet:           sheet,
 			Tracks:          make([]VirtualTrack, len(tracks)),
-		}
-
-		totalAudioSize := audioFi.Size()
-		totalKnownDuration := 0.0
-		for _, tr := range tracks {
-			if tr.End > tr.Start {
-				totalKnownDuration += (tr.End - tr.Start)
-			}
 		}
 
 		for i, tr := range tracks {
@@ -195,14 +213,14 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger) (*Dir
 	}
 
 	for _, album := range albums {
-		dirState.HiddenMonoliths[filepath.Base(album.SourceAudioPath)] = true
+		dirState.HiddenMonoliths[norm.NFC.String(filepath.Base(album.SourceAudioPath))] = true
 	}
 
 	rawEntries, _ := os.ReadDir(dirPath)
 	realNames := make(map[string]bool, len(rawEntries))
 	parentArtwork := make(map[string]string)
 	for _, re := range rawEntries {
-		name := re.Name()
+		name := norm.NFC.String(re.Name())
 		realNames[name] = true
 		if re.IsDir() {
 			continue
@@ -210,7 +228,7 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger) (*Dir
 		ext := strings.ToLower(filepath.Ext(name))
 		switch ext {
 		case ".jpg", ".jpeg", ".png", ".webp", ".gif", ".pdf":
-			parentArtwork[name] = filepath.Join(dirPath, name)
+			parentArtwork[name] = filepath.Join(dirPath, re.Name())
 		}
 	}
 
@@ -228,7 +246,7 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger) (*Dir
 	} else {
 		// Multi-album: generate virtual subdirectories (e.g. CD1/, CD2/)
 		for albumIdx, album := range albums {
-			subName := determineDiscDirName(album, albumIdx+1)
+			subName := norm.NFC.String(determineDiscDirName(album, albumIdx+1))
 			candSubName := subName
 			subSuffix := 2
 			for {
@@ -248,8 +266,9 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger) (*Dir
 			subOccupied := make(map[string]bool, len(parentArtwork))
 			mirrored := make(map[string]string, len(parentArtwork))
 			for artName, artPath := range parentArtwork {
-				mirrored[artName] = artPath
-				subOccupied[artName] = true
+				normArt := norm.NFC.String(artName)
+				mirrored[normArt] = artPath
+				subOccupied[normArt] = true
 			}
 
 			subState := &DirState{
@@ -287,7 +306,7 @@ func assignTrackFilenames(album *Album, occupiedNames map[string]bool, context s
 	tracksByName := make(map[string]*VirtualTrack, len(album.Tracks))
 	for i := range album.Tracks {
 		vt := &album.Tracks[i]
-		baseName := formatTrackFilename(vt.Num, vt.Performer, album.Sheet.Performer, vt.Title, ext)
+		baseName := norm.NFC.String(formatTrackFilename(vt.Num, vt.Performer, album.Sheet.Performer, vt.Title, ext))
 		candidateName := baseName
 		suffix := 2
 		for {

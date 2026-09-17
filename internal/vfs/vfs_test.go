@@ -14,6 +14,7 @@ import (
 	"gotrackfs/internal/cutter"
 
 	"github.com/winfsp/cgofuse/fuse"
+	"golang.org/x/text/unicode/norm"
 )
 
 func TestVFS_VirtualTrackListingAndAttributes(t *testing.T) {
@@ -705,14 +706,25 @@ FILE "audio.flac" WAVE
 		t.Errorf("expected positive estimated size, got %d", st.Size)
 	}
 
-	// 2. Open virtual track - triggers slice via cutter
+	// 2. Open virtual track - does NOT slice eagerly (lazy slicing on Read!)
 	openCode, fh := v.Open("/TestAlbum/01. First Track.flac", fuse.O_RDONLY)
 	if openCode != 0 {
 		t.Fatalf("Open virtual track failed: %d", openCode)
 	}
+	if mock.cutCount != 0 {
+		t.Fatalf("expected cutter NOT to be called on Open, got %d", mock.cutCount)
+	}
+
+	// 3. Read reads sliced audio data - triggers slice lazily
+	buf := make([]byte, 100)
+	n := v.Read("/TestAlbum/01. First Track.flac", buf, 0, fh)
+	expectedData := "REAL_SLICED_AUDIO_BYTES_FROM_CUTTER"
+	if n != len(expectedData) || string(buf[:n]) != expectedData {
+		t.Errorf("expected %q, got %q", expectedData, string(buf[:n]))
+	}
 
 	if mock.cutCount != 1 {
-		t.Fatalf("expected cutter to be called 1 time, got %d", mock.cutCount)
+		t.Fatalf("expected cutter to be called 1 time on Read, got %d", mock.cutCount)
 	}
 	if mock.lastReq.Tag("title") != "First Track" {
 		t.Errorf("expected Title 'First Track', got %q", mock.lastReq.Tag("title"))
@@ -722,14 +734,6 @@ FILE "audio.flac" WAVE
 	}
 	if mock.lastReq.ArtworkPath != filepath.Join(albumDir, "cover.jpg") {
 		t.Errorf("expected ArtworkPath to cover.jpg, got %q", mock.lastReq.ArtworkPath)
-	}
-
-	// 3. Read reads sliced audio data
-	buf := make([]byte, 100)
-	n := v.Read("/TestAlbum/01. First Track.flac", buf, 0, fh)
-	expectedData := "REAL_SLICED_AUDIO_BYTES_FROM_CUTTER"
-	if n != len(expectedData) || string(buf[:n]) != expectedData {
-		t.Errorf("expected %q, got %q", expectedData, string(buf[:n]))
 	}
 
 	// 4. Getattr now reports exact size of sliced file!
@@ -755,5 +759,89 @@ FILE "audio.flac" WAVE
 	v.Release("/TestAlbum/01. First Track.flac", fh2)
 }
 
+func TestVFS_UnicodeNormalization(t *testing.T) {
+	tmpDir := t.TempDir()
+	albumDir := filepath.Join(tmpDir, "Сплин 2002 Акустика")
+	if err := os.MkdirAll(albumDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
 
+	cueContent := `TITLE "Акустика"
+PERFORMER "Сплин"
+FILE "audio.flac" WAVE
+  TRACK 01 AUDIO
+    TITLE "За стеной"
+    INDEX 01 00:00:00
+  TRACK 02 AUDIO
+    TITLE "Бонни и Клайд"
+    INDEX 01 03:00:00
+`
+	if err := os.WriteFile(filepath.Join(albumDir, "album.cue"), []byte(cueContent), 0644); err != nil {
+		t.Fatalf("write cue: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(albumDir, "audio.flac"), make([]byte, 1024), 0644); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
 
+	cutterMgr, err := cutter.NewManager(cutter.Options{
+		Cutter: &testMockCutter{},
+		TTL:    1 * time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	v := New(Options{
+		SourceRoot: tmpDir,
+		Slicer:     cutterMgr,
+	})
+	defer v.Destroy()
+
+	// 1. Readdir on albumDir
+	var names []string
+	code := v.Readdir("/Сплин 2002 Акустика", func(name string, stat *fuse.Stat_t, ofst int64) bool {
+		names = append(names, name)
+		return true
+	}, 0, 0)
+	if code != 0 {
+		t.Fatalf("Readdir returned %d, expected 0", code)
+	}
+
+	// 2. Lookup using macOS NFD paths
+	// In NFD, 'й' is decomposed into U+0438 (и) + U+0306 (кратка)
+	nfdTrack1 := norm.NFD.String("/Сплин 2002 Акустика/01. За стеной.flac")
+	nfdTrack2 := norm.NFD.String("/Сплин 2002 Акустика/02. Бонни и Клайд.flac")
+
+	// Ensure our test string is actually decomposed
+	if nfdTrack1 == "/Сплин 2002 Акустика/01. За стеной.flac" {
+		t.Fatal("norm.NFD did not decompose unicode string")
+	}
+
+	var st fuse.Stat_t
+	code = v.Getattr(nfdTrack1, &st, 0)
+	if code != 0 {
+		t.Errorf("Getattr(nfdTrack1) returned %d, expected 0 (ENOENT bug reproduced)", code)
+	}
+
+	code = v.Getattr(nfdTrack2, &st, 0)
+	if code != 0 {
+		t.Errorf("Getattr(nfdTrack2) returned %d, expected 0", code)
+	}
+
+	// 3. Open and Read using NFD path
+	openCode, fh := v.Open(nfdTrack1, fuse.O_RDONLY)
+	if openCode != 0 {
+		t.Fatalf("Open(nfdTrack1) returned %d, expected 0", openCode)
+	}
+
+	buf := make([]byte, 16)
+	readBytes := v.Read(nfdTrack1, buf, 0, fh)
+	if readBytes <= 0 {
+		t.Errorf("Read(nfdTrack1) returned %d bytes, expected > 0", readBytes)
+	}
+
+	relCode := v.Release(nfdTrack1, fh)
+	if relCode != 0 {
+		t.Errorf("Release(nfdTrack1) returned %d, expected 0", relCode)
+	}
+}

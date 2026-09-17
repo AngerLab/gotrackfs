@@ -13,6 +13,7 @@ import (
 	"gotrackfs/internal/cutter"
 
 	"github.com/winfsp/cgofuse/fuse"
+	"golang.org/x/text/unicode/norm"
 )
 
 // TrackSlicer defines the interface needed by VFS to slice and acquire tracks on-demand.
@@ -35,6 +36,8 @@ type Options struct {
 type fileHandle struct {
 	file      *os.File
 	cutterKey string // non-empty if acquired via cutter
+	track     *VirtualTrack
+	mu        sync.Mutex
 }
 
 // VFS implements fuse.FileSystemInterface using a path-based routing model.
@@ -87,8 +90,12 @@ type resolvedNode struct {
 	isHidden     bool
 }
 
+func cleanNormPath(path string) string {
+	return norm.NFC.String(filepath.Clean(path))
+}
+
 func (v *VFS) resolve(path, op string) resolvedNode {
-	cleanPath := filepath.Clean(path)
+	cleanPath := cleanNormPath(path)
 	if cleanPath == "/" || cleanPath == "." {
 		return resolvedNode{
 			cleanPath: cleanPath,
@@ -96,8 +103,8 @@ func (v *VFS) resolve(path, op string) resolvedNode {
 		}
 	}
 
-	dir := filepath.Dir(cleanPath)
 	base := filepath.Base(cleanPath)
+	dir := filepath.Dir(cleanPath)
 	realDir := filepath.Join(v.sourceRoot, dir)
 	realPath := filepath.Join(v.sourceRoot, cleanPath)
 
@@ -190,7 +197,7 @@ func (v *VFS) Statfs(path string, stat *fuse.Statfs_t) int {
 }
 
 func (v *VFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
-	cleanPath := filepath.Clean(path)
+	cleanPath := cleanNormPath(path)
 	if cleanPath == "/" || cleanPath == "." {
 		return v.statRealPath(v.sourceRoot, stat)
 	}
@@ -244,7 +251,7 @@ func (v *VFS) statRealPath(realPath string, stat *fuse.Stat_t) int {
 }
 
 func (v *VFS) Opendir(path string) (int, uint64) {
-	cleanPath := filepath.Clean(path)
+	cleanPath := cleanNormPath(path)
 	if cleanPath == "/" || cleanPath == "." {
 		return 0, 0
 	}
@@ -276,7 +283,7 @@ func (v *VFS) Releasedir(path string, fh uint64) int {
 }
 
 func (v *VFS) Readdir(path string, fill func(name string, stat *fuse.Stat_t, ofst int64) bool, ofst int64, fh uint64) int {
-	cleanPath := filepath.Clean(path)
+	cleanPath := cleanNormPath(path)
 	if cleanPath != "/" && cleanPath != "." {
 		node := v.resolve(cleanPath, "Readdir")
 		if node.isHidden {
@@ -321,7 +328,8 @@ func (v *VFS) Readdir(path string, fill func(name string, stat *fuse.Stat_t, ofs
 	var names []string
 	if dirState != nil {
 		for _, e := range entries {
-			if !v.keepAlbum && dirState.HiddenMonoliths[e.Name()] {
+			eName := norm.NFC.String(e.Name())
+			if !v.keepAlbum && dirState.HiddenMonoliths[eName] {
 				continue
 			}
 			names = append(names, e.Name())
@@ -353,7 +361,7 @@ func (v *VFS) Open(path string, flags int) (int, uint64) {
 		return -fuse.EACCES, ^uint64(0)
 	}
 
-	cleanPath := filepath.Clean(path)
+	cleanPath := cleanNormPath(path)
 	node := v.resolve(cleanPath, "Open")
 	if node.isHidden {
 		return -fuse.ENOENT, ^uint64(0)
@@ -367,23 +375,13 @@ func (v *VFS) Open(path string, flags int) (int, uint64) {
 			return -fuse.ENOSYS, ^uint64(0)
 		}
 
-		key := node.track.CutterKey
-		tempPath, err := v.slicer.Acquire(context.Background(), key, node.track.Request)
-		if err != nil {
-			v.logger.Error("vfs: failed to slice audio track", "track", node.track.FileName, "error", err)
-			return -fuse.EIO, ^uint64(0)
-		}
-
-		f, err := os.Open(tempPath)
-		if err != nil {
-			v.slicer.Release(key)
-			return -fuse.EIO, ^uint64(0)
-		}
-
 		v.mu.Lock()
 		v.nextHandle++
 		fh := v.nextHandle
-		v.openFiles[fh] = &fileHandle{file: f, cutterKey: key}
+		v.openFiles[fh] = &fileHandle{
+			cutterKey: node.track.CutterKey,
+			track:     node.track,
+		}
 		v.mu.Unlock()
 
 		return 0, fh
@@ -420,6 +418,32 @@ func (v *VFS) Read(path string, buff []byte, ofst int64, fh uint64) int {
 		return -fuse.EBADF
 	}
 
+	if h.file == nil {
+		if h.track == nil {
+			return -fuse.EBADF
+		}
+
+		// Lazy slice on first Read!
+		h.mu.Lock()
+		if h.file == nil {
+			tempPath, err := v.slicer.Acquire(context.Background(), h.cutterKey, h.track.Request)
+			if err != nil {
+				h.mu.Unlock()
+				v.logger.Error("vfs: failed to slice audio track", "track", h.track.FileName, "error", err)
+				return -fuse.EIO
+			}
+
+			f, err := os.Open(tempPath)
+			if err != nil {
+				v.slicer.Release(h.cutterKey)
+				h.mu.Unlock()
+				return -fuse.EIO
+			}
+			h.file = f
+		}
+		h.mu.Unlock()
+	}
+
 	n, err := h.file.ReadAt(buff, ofst)
 	if err != nil && err != io.EOF {
 		return -fuse.EIO
@@ -441,10 +465,14 @@ func (v *VFS) Release(path string, fh uint64) int {
 	v.mu.Unlock()
 
 	if ok && h != nil {
-		_ = h.file.Close()
-		if h.cutterKey != "" && v.slicer != nil {
-			v.slicer.Release(h.cutterKey)
+		h.mu.Lock()
+		if h.file != nil {
+			_ = h.file.Close()
+			if h.cutterKey != "" && v.slicer != nil {
+				v.slicer.Release(h.cutterKey)
+			}
 		}
+		h.mu.Unlock()
 	}
 
 	return 0

@@ -16,13 +16,9 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
-// dirFacts captures file metadata (mtimes and sizes) required for cache validation.
+// dirFacts captures directory metadata required for cache validation.
 type dirFacts struct {
-	dirModTime    time.Time
-	cueModTimes   map[string]time.Time
-	cueSizes      map[string]int64
-	audioModTimes map[string]time.Time
-	audioSizes    map[string]int64
+	dirModTime time.Time
 }
 
 // buildDirState discovers CUE and audio files in dirPath, parses them,
@@ -38,22 +34,6 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger) (*Dir
 	}
 
 	if len(cueFiles) == 0 {
-		return nil, &dirFacts{dirModTime: dirFi.ModTime()}, nil
-	}
-
-	currentModTimes := make(map[string]time.Time, len(cueFiles))
-	currentSizes := make(map[string]int64, len(cueFiles))
-	for _, cp := range cueFiles {
-		fi, err := os.Stat(cp)
-		if err != nil {
-			// If file disappeared concurrently, skip it
-			continue
-		}
-		currentModTimes[cp] = fi.ModTime()
-		currentSizes[cp] = fi.Size()
-	}
-
-	if len(currentModTimes) == 0 {
 		return nil, &dirFacts{dirModTime: dirFi.ModTime()}, nil
 	}
 
@@ -195,9 +175,7 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger) (*Dir
 	}
 
 	facts := &dirFacts{
-		dirModTime:  dirFi.ModTime(),
-		cueModTimes: currentModTimes,
-		cueSizes:    currentSizes,
+		dirModTime: dirFi.ModTime(),
 	}
 
 	if len(albums) == 0 {
@@ -280,15 +258,6 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger) (*Dir
 			}
 
 			dirState.Subdirs[subName] = subState
-		}
-	}
-
-	facts.audioModTimes = make(map[string]time.Time, len(albums))
-	facts.audioSizes = make(map[string]int64, len(albums))
-	for _, album := range albums {
-		if fi, err := os.Stat(album.SourceAudioPath); err == nil {
-			facts.audioModTimes[album.SourceAudioPath] = fi.ModTime()
-			facts.audioSizes[album.SourceAudioPath] = fi.Size()
 		}
 	}
 

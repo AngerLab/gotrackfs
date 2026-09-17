@@ -2,9 +2,9 @@ package vfs
 
 import (
 	"log/slog"
-	"os"
 	"sync"
 
+	"golang.org/x/sync/singleflight"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -12,6 +12,7 @@ import (
 type AlbumCache struct {
 	mu     sync.RWMutex
 	dirs   map[string]*cachedDir
+	sfg    singleflight.Group
 	logger *slog.Logger
 }
 
@@ -32,9 +33,12 @@ func NewAlbumCache(logger *slog.Logger) *AlbumCache {
 }
 
 // GetDirState returns the DirState for dirPath, or parses it if needed.
+// Compares dirModTime to invalidate cache without stat-ing individual files,
+// and uses singleflight to ensure concurrent callers for the same directory share a single parse operation.
 func (c *AlbumCache) GetDirState(dirPath string) (*DirState, error) {
 	dirPath = norm.NFC.String(dirPath)
-	dirFi, err := os.Stat(dirPath)
+
+	dirFi, err := statPath(dirPath)
 	if err != nil {
 		return nil, err
 	}
@@ -43,44 +47,41 @@ func (c *AlbumCache) GetDirState(dirPath string) (*DirState, error) {
 	cached, ok := c.dirs[dirPath]
 	c.mu.RUnlock()
 
+	// If directory mtime hasn't changed, return cached state without re-parsing or stat-ing individual files.
 	if ok && cached != nil && cached.facts != nil && cached.facts.dirModTime.Equal(dirFi.ModTime()) {
-		if cached.state == nil && len(cached.facts.cueModTimes) == 0 {
-			// Directory has no CUE files and directory contents have not changed.
-			return nil, nil
-		}
-		if isFilesCacheValid(cached.facts) {
-			return cached.state, nil
-		}
+		return cached.state, nil
 	}
 
-	state, facts, err := buildDirState(dirPath, dirFi, c.logger)
+	// Stampede elimination: parse using singleflight so only one goroutine builds state.
+	res, err, _ := c.sfg.Do(dirPath, func() (any, error) {
+		// Re-check cache under read lock (another singleflight runner might have just finished)
+		c.mu.RLock()
+		cached, ok := c.dirs[dirPath]
+		c.mu.RUnlock()
+		if ok && cached != nil && cached.facts != nil && cached.facts.dirModTime.Equal(dirFi.ModTime()) {
+			return cached.state, nil
+		}
+
+		state, facts, err := buildDirState(dirPath, dirFi, c.logger)
+		if err != nil {
+			return nil, err
+		}
+
+		c.mu.Lock()
+		c.dirs[dirPath] = &cachedDir{
+			facts: facts,
+			state: state,
+		}
+		c.mu.Unlock()
+
+		return state, nil
+	})
+
 	if err != nil {
 		return nil, err
 	}
-
-	c.mu.Lock()
-	c.dirs[dirPath] = &cachedDir{
-		facts: facts,
-		state: state,
+	if res == nil {
+		return nil, nil
 	}
-	c.mu.Unlock()
-
-	return state, nil
-}
-
-// isFilesCacheValid checks if known CUE and audio files still match their cached mtime and size.
-func isFilesCacheValid(facts *dirFacts) bool {
-	for cp, oldMtime := range facts.cueModTimes {
-		fi, err := os.Stat(cp)
-		if err != nil || !fi.ModTime().Equal(oldMtime) || fi.Size() != facts.cueSizes[cp] {
-			return false
-		}
-	}
-	for audioPath, oldMtime := range facts.audioModTimes {
-		fi, err := os.Stat(audioPath)
-		if err != nil || !fi.ModTime().Equal(oldMtime) || fi.Size() != facts.audioSizes[audioPath] {
-			return false
-		}
-	}
-	return true
+	return res.(*DirState), nil
 }

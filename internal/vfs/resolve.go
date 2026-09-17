@@ -1,14 +1,13 @@
 package vfs
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 )
 
 // findAllCueFiles returns all .cue files in the specified directory.
 func findAllCueFiles(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
+	entries, err := readDir(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -27,11 +26,11 @@ func resolveAudioFileForCue(dir, cuePath, declaredName string, claimed map[strin
 	// 1. Declared name in CUE
 	if declaredName != "" {
 		p := filepath.Join(dir, declaredName)
-		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && !claimed[p] {
+		if fi, err := statPath(p); err == nil && !fi.IsDir() && !claimed[p] {
 			return p
 		}
 		p = filepath.Join(dir, filepath.Base(declaredName))
-		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && !claimed[p] {
+		if fi, err := statPath(p); err == nil && !fi.IsDir() && !claimed[p] {
 			return p
 		}
 
@@ -39,7 +38,7 @@ func resolveAudioFileForCue(dir, cuePath, declaredName string, claimed map[strin
 		stem := strings.TrimSuffix(filepath.Base(declaredName), filepath.Ext(declaredName))
 		for _, ext := range []string{".flac", ".wav", ".ape", ".wv", ".m4a", ".mp3", ".FLAC", ".WAV"} {
 			cand := filepath.Join(dir, stem+ext)
-			if fi, err := os.Stat(cand); err == nil && !fi.IsDir() && !claimed[cand] {
+			if fi, err := statPath(cand); err == nil && !fi.IsDir() && !claimed[cand] {
 				return cand
 			}
 		}
@@ -50,13 +49,13 @@ func resolveAudioFileForCue(dir, cuePath, declaredName string, claimed map[strin
 	cueStem := strings.TrimSuffix(cueBase, filepath.Ext(cueBase))
 	for _, ext := range []string{".flac", ".wav", ".ape", ".wv", ".m4a", ".mp3", ".FLAC", ".WAV"} {
 		cand := filepath.Join(dir, cueStem+ext)
-		if fi, err := os.Stat(cand); err == nil && !fi.IsDir() && !claimed[cand] {
+		if fi, err := statPath(cand); err == nil && !fi.IsDir() && !claimed[cand] {
 			return cand
 		}
 	}
 
 	// 3. If only one unclaimed audio file exists in directory
-	entries, err := os.ReadDir(dir)
+	entries, err := readDir(dir)
 	if err == nil {
 		var unclaimed []string
 		for _, e := range entries {

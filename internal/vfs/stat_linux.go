@@ -10,7 +10,6 @@ import (
 
 func copyStat(dst *fuse.Stat_t, src *syscall.Stat_t) {
 	dst.Dev = uint64(src.Dev)
-	dst.Ino = uint64(src.Ino)
 	dst.Mode = uint32(src.Mode)
 	dst.Nlink = uint32(src.Nlink)
 	dst.Uid = uint32(src.Uid)

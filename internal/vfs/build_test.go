@@ -68,8 +68,8 @@ FILE "audio.flac" WAVE
 	if !state.HiddenMonoliths["audio.flac"] {
 		t.Errorf("expected audio.flac to be hidden")
 	}
-	if len(facts.cueModTimes) != 1 || len(facts.audioModTimes) != 1 {
-		t.Errorf("expected 1 cue and 1 audio fact, got cue=%d audio=%d", len(facts.cueModTimes), len(facts.audioModTimes))
+	if facts.dirModTime.IsZero() {
+		t.Errorf("expected non-zero dirModTime in facts")
 	}
 }
 

@@ -325,9 +325,10 @@ FILE "audio.flac" WAVE
 	if err := os.WriteFile(audioPath, newAudioData, 0644); err != nil {
 		t.Fatal(err)
 	}
-	// Ensure mtime is different
+	// Ensure mtime is different on file and directory
 	newMtime := time.Now().Add(2 * time.Second)
 	_ = os.Chtimes(audioPath, newMtime, newMtime)
+	_ = os.Chtimes(albumDir, newMtime, newMtime)
 
 	var st2 fuse.Stat_t
 	if code := v.Getattr("/SingleAlbum/01. Track 1.flac", &st2, 0); code != 0 {
@@ -998,5 +999,223 @@ FILE "race.flac" WAVE
 	wg.Wait()
 	v.Release("/RaceAlbum/01. Race Track.flac", fh)
 }
+
+func TestVFS_DeterministicUniqueInodes(t *testing.T) {
+	tmpDir := t.TempDir()
+	albumDir := filepath.Join(tmpDir, "Splin")
+	if err := os.MkdirAll(albumDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cueContent := `TITLE "Акустика"
+FILE "splin.flac" WAVE
+  TRACK 01 AUDIO
+    TITLE "За стеной"
+    INDEX 01 00:00:00
+  TRACK 02 AUDIO
+    TITLE "Три цвета"
+    INDEX 01 03:00:00
+`
+	if err := os.WriteFile(filepath.Join(albumDir, "album.cue"), []byte(cueContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(albumDir, "splin.flac"), make([]byte, 1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	v := New(Options{SourceRoot: tmpDir})
+
+	// 1. Root inode MUST be 1
+	var rootStat fuse.Stat_t
+	if code := v.Getattr("/", &rootStat, 0); code != 0 {
+		t.Fatalf("Getattr / failed: %d", code)
+	}
+	if rootStat.Ino != 1 {
+		t.Errorf("expected root inode 1, got %d", rootStat.Ino)
+	}
+
+	// 2. Directory inode
+	var dirStat fuse.Stat_t
+	if code := v.Getattr("/Splin", &dirStat, 0); code != 0 {
+		t.Fatalf("Getattr /Splin failed: %d", code)
+	}
+	expectedDirIno := inodeFromPath("/Splin")
+	if dirStat.Ino != expectedDirIno {
+		t.Errorf("expected dir inode %d, got %d", expectedDirIno, dirStat.Ino)
+	}
+
+	// 3. Virtual tracks MUST have distinct, non-zero, non-1 inodes
+	var tr1Stat, tr2Stat fuse.Stat_t
+	if code := v.Getattr("/Splin/01. За стеной.flac", &tr1Stat, 0); code != 0 {
+		t.Fatalf("Getattr track 1 failed: %d", code)
+	}
+	if code := v.Getattr("/Splin/02. Три цвета.flac", &tr2Stat, 0); code != 0 {
+		t.Fatalf("Getattr track 2 failed: %d", code)
+	}
+
+	if tr1Stat.Ino < 2 || tr2Stat.Ino < 2 {
+		t.Errorf("inodes must be >= 2: tr1=%d, tr2=%d", tr1Stat.Ino, tr2Stat.Ino)
+	}
+	if tr1Stat.Ino == tr2Stat.Ino {
+		t.Errorf("different tracks in same album must have different inodes: tr1=%d, tr2=%d", tr1Stat.Ino, tr2Stat.Ino)
+	}
+
+	// 4. Inode must be stable across multiple calls
+	var tr1Repeat fuse.Stat_t
+	if code := v.Getattr("/Splin/01. За стеной.flac", &tr1Repeat, 0); code != 0 {
+		t.Fatalf("repeat Getattr failed: %d", code)
+	}
+	if tr1Repeat.Ino != tr1Stat.Ino {
+		t.Errorf("inode not stable: first=%d, second=%d", tr1Stat.Ino, tr1Repeat.Ino)
+	}
+
+	// 5. Inode must match between NFC and NFD paths
+	nfdPath := "/Splin/01. " + norm.NFD.String("За стеной") + ".flac"
+	var tr1NFD fuse.Stat_t
+	if code := v.Getattr(nfdPath, &tr1NFD, 0); code != 0 {
+		t.Fatalf("Getattr NFD path failed: %d", code)
+	}
+	if tr1NFD.Ino != tr1Stat.Ino {
+		t.Errorf("NFC and NFD must have identical inode: nfc=%d, nfd=%d", tr1Stat.Ino, tr1NFD.Ino)
+	}
+}
+
+func TestAlbumCache_SingleflightStampedeElimination(t *testing.T) {
+	tmpDir := t.TempDir()
+	albumDir := filepath.Join(tmpDir, "StampedeAlbum")
+	if err := os.MkdirAll(albumDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cueContent := `TITLE "Stampede"
+FILE "stampede.flac" WAVE
+  TRACK 01 AUDIO
+    TITLE "Track 1"
+    INDEX 01 00:00:00
+`
+	if err := os.WriteFile(filepath.Join(albumDir, "album.cue"), []byte(cueContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(albumDir, "stampede.flac"), make([]byte, 1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cache := NewAlbumCache(nil)
+
+	const concurrentWorkers = 50
+	var wg sync.WaitGroup
+	wg.Add(concurrentWorkers)
+
+	results := make([]*DirState, concurrentWorkers)
+	errors := make([]error, concurrentWorkers)
+
+	for i := 0; i < concurrentWorkers; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			state, err := cache.GetDirState(albumDir)
+			results[idx] = state
+			errors[idx] = err
+		}(i)
+	}
+
+	wg.Wait()
+
+	for i := 0; i < concurrentWorkers; i++ {
+		if errors[i] != nil {
+			t.Fatalf("worker %d returned error: %v", i, errors[i])
+		}
+		if results[i] == nil {
+			t.Fatalf("worker %d returned nil state", i)
+		}
+		// Every worker should have received the exact same cached pointer!
+		if results[i] != results[0] {
+			t.Fatalf("worker %d got different state pointer than worker 0 (singleflight failed)", i)
+		}
+	}
+}
+
+func TestVFS_NFDDiskFilesAndDirectoriesResolvedViaNFC(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// 1. Create a directory named on disk in decomposed Unicode (NFD)
+	nfdDirName := norm.NFD.String("Альбом_Сплин")
+	diskAlbumDir := filepath.Join(tmpDir, nfdDirName)
+	if err := os.MkdirAll(diskAlbumDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Create CUE sheet, audio file, and artwork named on disk in NFD
+	nfdCoverName := norm.NFD.String("обложка_й.jpg")
+	coverPath := filepath.Join(diskAlbumDir, nfdCoverName)
+	coverData := []byte("fake jpeg image data for nfd test")
+	if err := os.WriteFile(coverPath, coverData, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cueContent := `TITLE "Тест NFD"
+FILE "audio.flac" WAVE
+  TRACK 01 AUDIO
+    TITLE "Трек 1"
+    INDEX 01 00:00:00
+`
+	if err := os.WriteFile(filepath.Join(diskAlbumDir, "album.cue"), []byte(cueContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(diskAlbumDir, "audio.flac"), make([]byte, 1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	v := New(Options{SourceRoot: tmpDir, KeepAlbum: true})
+
+	// 3. Query directory using precomposed NFC path
+	nfcDirPath := "/" + norm.NFC.String("Альбом_Сплин")
+	var dirStat fuse.Stat_t
+	if code := v.Getattr(nfcDirPath, &dirStat, 0); code != 0 {
+		t.Fatalf("Getattr on NFC dir path %q failed: %d", nfcDirPath, code)
+	}
+
+	code, dh := v.Opendir(nfcDirPath)
+	if code != 0 {
+		t.Fatalf("Opendir on NFC dir path %q failed: %d", nfcDirPath, code)
+	}
+	v.Releasedir(nfcDirPath, dh)
+
+	// 4. Read directory using NFC path
+	var listedNames []string
+	fill := func(name string, stat *fuse.Stat_t, ofst int64) bool {
+		listedNames = append(listedNames, name)
+		return true
+	}
+	if code := v.Readdir(nfcDirPath, fill, 0, 0); code != 0 {
+		t.Fatalf("Readdir on NFC dir path failed: %d", code)
+	}
+
+	// 5. Query and open real file (cover) using NFC path
+	nfcCoverPath := nfcDirPath + "/" + norm.NFC.String("обложка_й.jpg")
+	var coverStat fuse.Stat_t
+	if code := v.Getattr(nfcCoverPath, &coverStat, 0); code != 0 {
+		t.Fatalf("Getattr on NFC cover path %q failed: %d", nfcCoverPath, code)
+	}
+	if coverStat.Size != int64(len(coverData)) {
+		t.Errorf("expected cover size %d, got %d", len(coverData), coverStat.Size)
+	}
+
+	openCode, fh := v.Open(nfcCoverPath, fuse.O_RDONLY)
+	if openCode != 0 {
+		t.Fatalf("Open on NFC cover path %q failed: %d", nfcCoverPath, openCode)
+	}
+	defer v.Release(nfcCoverPath, fh)
+
+	readBuf := make([]byte, len(coverData))
+	n := v.Read(nfcCoverPath, readBuf, 0, fh)
+	if n != len(coverData) {
+		t.Fatalf("expected to read %d bytes, got %d", len(coverData), n)
+	}
+	if string(readBuf) != string(coverData) {
+		t.Errorf("read content mismatch: got %q, want %q", string(readBuf), string(coverData))
+	}
+}
+
+
 
 

@@ -8,4 +8,8 @@ require (
 	golang.org/x/text v0.42.0
 )
 
-require github.com/winfsp/cgofuse v1.6.0 // indirect
+require (
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/winfsp/cgofuse v1.6.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
+)

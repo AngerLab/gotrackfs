@@ -13,9 +13,23 @@ import (
 
 	"gotrackfs/internal/cutter"
 
+	"github.com/cespare/xxhash/v2"
 	"github.com/winfsp/cgofuse/fuse"
 	"golang.org/x/text/unicode/norm"
 )
+
+// inodeFromPath deterministically generates a unique, stable 64-bit inode number from a clean VFS path.
+// Following restic conventions: root is 1, 0 is invalid, and hashes < 2 are remapped to >= 2.
+func inodeFromPath(cleanPath string) uint64 {
+	if cleanPath == "/" || cleanPath == "." || cleanPath == "" {
+		return 1
+	}
+	ino := xxhash.Sum64String(cleanPath)
+	if ino < 2 {
+		ino += 2
+	}
+	return ino
+}
 
 // TrackSlicer defines the interface needed by VFS to slice and acquire tracks on-demand.
 type TrackSlicer interface {
@@ -28,9 +42,9 @@ type TrackSlicer interface {
 // Options holds configuration options for the VFS filesystem.
 type Options struct {
 	SourceRoot string
-	KeepAlbum  bool         // If true, keep monolithic audio files visible alongside virtual tracks
-	Debug      bool         // If true, enables verbose debug logging
-	Logger     *slog.Logger // Optional structured logger. If nil, a default text logger is used with level based on Debug.
+	KeepAlbum  bool          // If true, keep monolithic audio files visible alongside virtual tracks
+	Debug      bool          // If true, enables verbose debug logging
+	Logger     *slog.Logger  // Optional structured logger. If nil, a default text logger is used with level based on Debug.
 	Slicer     TrackSlicer  // Optional audio slicer implementation. If nil, virtual track playback is disabled (Open returns ENOSYS).
 }
 
@@ -201,6 +215,9 @@ func (v *VFS) Statfs(path string, stat *fuse.Statfs_t) int {
 
 func (v *VFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 	cleanPath := cleanNormPath(path)
+	defer func() {
+		stat.Ino = inodeFromPath(cleanPath)
+	}()
 	if cleanPath == "/" || cleanPath == "." {
 		return v.statRealPath(v.sourceRoot, stat)
 	}
@@ -213,7 +230,7 @@ func (v *VFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 	if node.isVirtualDir {
 		parentRealDir := filepath.Dir(node.realPath)
 		var st syscall.Stat_t
-		if err := syscall.Lstat(parentRealDir, &st); err != nil {
+		if err := lstatSyscall(parentRealDir, &st); err != nil {
 			return -fuse.ENOENT
 		}
 		copyStat(stat, &st)
@@ -224,7 +241,7 @@ func (v *VFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 	if node.track != nil {
 		// Virtual track entry
 		var st syscall.Stat_t
-		if err := syscall.Lstat(node.track.Request.SourceAudioPath, &st); err != nil {
+		if err := lstatSyscall(node.track.Request.SourceAudioPath, &st); err != nil {
 			return -fuse.ENOENT
 		}
 
@@ -246,7 +263,7 @@ func (v *VFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 
 func (v *VFS) statRealPath(realPath string, stat *fuse.Stat_t) int {
 	var st syscall.Stat_t
-	if err := syscall.Lstat(realPath, &st); err != nil {
+	if err := lstatSyscall(realPath, &st); err != nil {
 		return -fuse.ENOENT
 	}
 	copyStat(stat, &st)
@@ -271,7 +288,7 @@ func (v *VFS) Opendir(path string) (int, uint64) {
 	}
 
 	var st syscall.Stat_t
-	if err := syscall.Lstat(node.realPath, &st); err != nil {
+	if err := lstatSyscall(node.realPath, &st); err != nil {
 		return -fuse.ENOENT, ^uint64(0)
 	}
 	if (st.Mode & syscall.S_IFMT) != syscall.S_IFDIR {
@@ -315,7 +332,7 @@ func (v *VFS) Readdir(path string, fill func(name string, stat *fuse.Stat_t, ofs
 	}
 
 	realDir := filepath.Join(v.sourceRoot, cleanPath)
-	entries, err := os.ReadDir(realDir)
+	entries, err := readDir(realDir)
 	if err != nil {
 		return -fuse.ENOENT
 	}
@@ -393,7 +410,7 @@ func (v *VFS) Open(path string, flags int) (int, uint64) {
 		return 0, fh
 	}
 
-	f, err := os.Open(node.realPath)
+	f, err := openRealFile(node.realPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return -fuse.ENOENT, ^uint64(0)

@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/AngerLab/gotrackfs/internal/cutter"
 	"github.com/AngerLab/gotrackfs/internal/vfs"
@@ -21,11 +22,26 @@ func main() {
 		debug      bool
 		keepAlbum  bool
 		allowOther bool
+		cacheTTL   time.Duration
 	)
 	flag.BoolVar(&debug, "debug", false, "Enable FUSE and VFS debug logging")
 	flag.BoolVar(&keepAlbum, "keep-album", false, "Keep monolithic audio file visible alongside virtual tracks")
 	flag.BoolVar(&allowOther, "allow-other", false, "Allow other users to access the mount (requires user_allow_other in /etc/fuse.conf)")
+	flag.DurationVar(&cacheTTL, "cache-ttl", 5*time.Minute, "Cache time-to-live for sliced tracks after last close (e.g. 5m, 30s)")
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: %s [options] <source_dir> <mount_point>\n\nOptions:\n", filepath.Base(os.Args[0]))
+		flag.PrintDefaults()
+	}
 	flag.Parse()
+
+	args := flag.Args()
+	if len(args) < 2 {
+		flag.Usage()
+		os.Exit(2)
+	}
+
+	sourceDir := args[0]
+	mountPoint := args[1]
 
 	logLevel := slog.LevelInfo
 	if debug {
@@ -33,17 +49,6 @@ func main() {
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
 	slog.SetDefault(logger)
-
-	args := flag.Args()
-	sourceDir := "SOURCE"
-	mountPoint := "VIRTUAL"
-
-	if len(args) >= 1 {
-		sourceDir = args[0]
-	}
-	if len(args) >= 2 {
-		mountPoint = args[1]
-	}
 
 	absSource, err := filepath.Abs(sourceDir)
 	if err != nil {
@@ -70,6 +75,7 @@ func main() {
 	} else {
 		cutterMgr, err := cutter.NewManager(cutter.Options{
 			Cutter: ffmpegCutter,
+			TTL:    cacheTTL,
 			Logger: logger,
 		})
 		if err != nil {

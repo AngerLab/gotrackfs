@@ -65,10 +65,6 @@ func (o *Options) EnsureDefaults() {
 type fileHandle struct {
 	file      atomic.Pointer[os.File]
 	cutterKey string // non-empty if acquired via cutter
-	track     *VirtualTrack
-	ctx       context.Context
-	cancel    context.CancelFunc
-	mu        sync.Mutex
 }
 
 // VFS implements fuse.FileSystemInterface using a path-based routing model.
@@ -100,9 +96,7 @@ func New(opts Options) *VFS {
 }
 
 type resolvedNode struct {
-	cleanPath    string
 	realPath     string
-	dirState     *DirState
 	track        *VirtualTrack
 	isVirtualDir bool
 	subDirState  *DirState
@@ -117,8 +111,7 @@ func (v *VFS) resolve(path, op string) resolvedNode {
 	cleanPath := cleanNormPath(path)
 	if cleanPath == "/" || cleanPath == "." {
 		return resolvedNode{
-			cleanPath: cleanPath,
-			realPath:  v.sourceRoot,
+			realPath: v.sourceRoot,
 		}
 	}
 
@@ -135,9 +128,7 @@ func (v *VFS) resolve(path, op string) resolvedNode {
 
 	if dirState != nil {
 		node := resolvedNode{
-			cleanPath: cleanPath,
-			realPath:  realPath,
-			dirState:  dirState,
+			realPath: realPath,
 		}
 
 		// Check if base is a virtual subdirectory (e.g. CD1)
@@ -176,9 +167,7 @@ func (v *VFS) resolve(path, op string) resolvedNode {
 	if parentState != nil {
 		if subState, ok := parentState.Subdirs[subDirName]; ok {
 			node := resolvedNode{
-				cleanPath:   cleanPath,
 				realPath:    realPath,
-				dirState:    subState,
 				subDirState: subState,
 			}
 
@@ -201,8 +190,7 @@ func (v *VFS) resolve(path, op string) resolvedNode {
 
 	// 3. Fallback: plain real path
 	return resolvedNode{
-		cleanPath: cleanPath,
-		realPath:  realPath,
+		realPath: realPath,
 	}
 }
 
@@ -249,11 +237,30 @@ func (v *VFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 
 		copyStat(stat, &st)
 		size := node.track.EstimatedSize
-		if v.slicer != nil {
+
+		// 1. If a valid matching file handle is open, use exact file size from open descriptor
+		var foundExact bool
+		if fh != 0 && fh != ^uint64(0) {
+			v.mu.Lock()
+			h, ok := v.openFiles[fh]
+			v.mu.Unlock()
+			if ok && h != nil && h.cutterKey == node.track.CutterKey {
+				if f := h.file.Load(); f != nil {
+					if fi, err := f.Stat(); err == nil {
+						size = fi.Size()
+						foundExact = true
+					}
+				}
+			}
+		}
+
+		// 2. If fh didn't yield exact size (e.g. fh was 0, invalid, different track, or released), check cache
+		if !foundExact && v.slicer != nil {
 			if exactSize, ok := v.slicer.GetExisting(node.track.CutterKey); ok {
 				size = exactSize
 			}
 		}
+
 		stat.Size = size
 		stat.Mode = syscall.S_IFREG | 0444
 		return 0
@@ -397,16 +404,31 @@ func (v *VFS) Open(path string, flags int) (int, uint64) {
 			return -fuse.ENOSYS, ^uint64(0)
 		}
 
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx := context.Background()
+		tempPath, err := v.slicer.Acquire(ctx, node.track.CutterKey, node.track.Slice)
+		if err != nil {
+			if err != context.Canceled {
+				v.logger.Error("vfs: failed to slice audio track", "track", node.track.FileName, "error", err)
+			}
+			return -fuse.EIO, ^uint64(0)
+		}
+
+		f, err := os.Open(tempPath)
+		if err != nil {
+			v.slicer.Release(node.track.CutterKey)
+			v.logger.Error("vfs: failed to open sliced audio temp file", "path", tempPath, "error", err)
+			return -fuse.EIO, ^uint64(0)
+		}
+
+		h := &fileHandle{
+			cutterKey: node.track.CutterKey,
+		}
+		h.file.Store(f)
+
 		v.mu.Lock()
 		v.nextHandle++
 		fh := v.nextHandle
-		v.openFiles[fh] = &fileHandle{
-			cutterKey: node.track.CutterKey,
-			track:     node.track,
-			ctx:       ctx,
-			cancel:    cancel,
-		}
+		v.openFiles[fh] = h
 		v.mu.Unlock()
 
 		return 0, fh
@@ -448,33 +470,7 @@ func (v *VFS) Read(path string, buff []byte, ofst int64, fh uint64) int {
 
 	f := h.file.Load()
 	if f == nil {
-		if h.track == nil {
-			return -fuse.EBADF
-		}
-
-		// Lazy slice on first Read!
-		h.mu.Lock()
-		f = h.file.Load()
-		if f == nil {
-			tempPath, err := v.slicer.Acquire(h.ctx, h.cutterKey, h.track.Slice)
-			if err != nil {
-				h.mu.Unlock()
-				if err != context.Canceled {
-					v.logger.Error("vfs: failed to slice audio track", "track", h.track.FileName, "error", err)
-				}
-				return -fuse.EIO
-			}
-
-			openedFile, err := os.Open(tempPath)
-			if err != nil {
-				v.slicer.Release(h.cutterKey)
-				h.mu.Unlock()
-				return -fuse.EIO
-			}
-			h.file.Store(openedFile)
-			f = openedFile
-		}
-		h.mu.Unlock()
+		return -fuse.EBADF
 	}
 
 	n, err := f.ReadAt(buff, ofst)
@@ -498,11 +494,6 @@ func (v *VFS) Release(path string, fh uint64) int {
 	v.mu.Unlock()
 
 	if ok && h != nil {
-		if h.cancel != nil {
-			h.cancel()
-		}
-
-		h.mu.Lock()
 		f := h.file.Swap(nil)
 		if f != nil {
 			_ = f.Close()
@@ -510,13 +501,23 @@ func (v *VFS) Release(path string, fh uint64) int {
 				v.slicer.Release(h.cutterKey)
 			}
 		}
-		h.mu.Unlock()
 	}
 
 	return 0
 }
 
 func (v *VFS) Destroy() {
+	v.mu.Lock()
+	for fh, h := range v.openFiles {
+		delete(v.openFiles, fh)
+		if h != nil {
+			if f := h.file.Swap(nil); f != nil {
+				_ = f.Close()
+			}
+		}
+	}
+	v.mu.Unlock()
+
 	if v.slicer != nil {
 		_ = v.slicer.Close()
 	}

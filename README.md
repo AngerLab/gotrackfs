@@ -66,6 +66,7 @@ gotrackfs ~/Music ./VIRTUAL
 | `-debug` | Verbose FUSE and VFS debug logging |
 | `-keep-album` | Keep monolithic audio files visible next to virtual tracks |
 | `-allow-other` | Allow other users to access the mount (requires `user_allow_other` in `/etc/fuse.conf`) |
+| `-cache-ttl` | Cache time-to-live for sliced tracks after last close (default `5m`, e.g. `10m`, `30s`) |
 
 Unmount with `Ctrl+C` (graceful SIGINT/SIGTERM handling included).
 

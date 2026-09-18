@@ -16,7 +16,7 @@ import (
 type Options struct {
 	Cutter  Cutter
 	TempDir string        // If empty, a subdirectory in os.TempDir() is created at construction time
-	TTL     time.Duration // Time-to-live after refCount reaches 0. Default: 60s
+	TTL     time.Duration // Time-to-live after refCount reaches 0. Library default: 60s (CLI default: 5m)
 	Logger  *slog.Logger
 }
 

@@ -16,6 +16,17 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
+const (
+	// estimationSafetyMargin is applied to proportional track audio size to ensure
+	// pre-slice Getattr reports a safe upper bound. This covers re-encoding container
+	// overhead (standalone FLAC header, seek tables, CUE Vorbis comments) and compression variance.
+	estimationSafetyMargin = 1.25
+
+	// minEstimatedTrackFloor provides a reasonable minimum size floor (1 MB) for very short tracks
+	// or corrupted estimates to prevent undersized buffer allocations by media players.
+	minEstimatedTrackFloor = 1024 * 1024
+)
+
 // dirFacts captures directory metadata required for cache validation.
 type dirFacts struct {
 	dirModTime time.Time
@@ -122,12 +133,12 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger) (*Dir
 
 			estimatedSize := int64(0)
 			if trackDuration > 0 && totalKnownDuration > 0 {
-				estimatedSize = int64(float64(totalAudioSize) * (trackDuration / totalKnownDuration) * 1.25)
+				estimatedSize = int64(float64(totalAudioSize) * (trackDuration / totalKnownDuration) * estimationSafetyMargin)
 			} else {
-				estimatedSize = int64(float64(totalAudioSize) / float64(len(tracks)) * 1.25)
+				estimatedSize = int64(float64(totalAudioSize) / float64(len(tracks)) * estimationSafetyMargin)
 			}
-			if estimatedSize < 1024*1024 {
-				estimatedSize = 1024 * 1024
+			if estimatedSize < minEstimatedTrackFloor {
+				estimatedSize = minEstimatedTrackFloor
 			}
 
 			tags := make(map[string]string)

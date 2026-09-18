@@ -40,6 +40,11 @@ func main() {
 		os.Exit(2)
 	}
 
+	if cacheTTL <= 0 {
+		fmt.Fprintf(os.Stderr, "error: -cache-ttl must be positive (got %v)\n", cacheTTL)
+		os.Exit(2)
+	}
+
 	sourceDir := args[0]
 	mountPoint := args[1]
 

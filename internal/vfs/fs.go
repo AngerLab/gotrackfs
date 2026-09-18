@@ -75,6 +75,8 @@ type VFS struct {
 	logger     *slog.Logger
 	cache      *AlbumCache
 	slicer     TrackSlicer
+	ctx        context.Context
+	cancel     context.CancelFunc
 
 	mu         sync.Mutex
 	openFiles  map[uint64]*fileHandle
@@ -85,12 +87,15 @@ type VFS struct {
 func New(opts Options) *VFS {
 	opts.EnsureDefaults()
 
+	ctx, cancel := context.WithCancel(context.Background())
 	return &VFS{
 		sourceRoot: opts.SourceRoot,
 		keepAlbum:  opts.KeepAlbum,
 		logger:     opts.Logger,
 		cache:      NewAlbumCache(opts.Logger),
 		slicer:     opts.Slicer,
+		ctx:        ctx,
+		cancel:     cancel,
 		openFiles:  make(map[uint64]*fileHandle),
 	}
 }
@@ -404,8 +409,7 @@ func (v *VFS) Open(path string, flags int) (int, uint64) {
 			return -fuse.ENOSYS, ^uint64(0)
 		}
 
-		ctx := context.Background()
-		tempPath, err := v.slicer.Acquire(ctx, node.track.CutterKey, node.track.Slice)
+		tempPath, err := v.slicer.Acquire(v.ctx, node.track.CutterKey, node.track.Slice)
 		if err != nil {
 			if err != context.Canceled {
 				v.logger.Error("vfs: failed to slice audio track", "track", node.track.FileName, "error", err)
@@ -426,6 +430,12 @@ func (v *VFS) Open(path string, flags int) (int, uint64) {
 		h.file.Store(f)
 
 		v.mu.Lock()
+		if v.ctx.Err() != nil {
+			v.mu.Unlock()
+			_ = f.Close()
+			v.slicer.Release(node.track.CutterKey)
+			return -fuse.ENODEV, ^uint64(0)
+		}
 		v.nextHandle++
 		fh := v.nextHandle
 		v.openFiles[fh] = h
@@ -507,6 +517,10 @@ func (v *VFS) Release(path string, fh uint64) int {
 }
 
 func (v *VFS) Destroy() {
+	if v.cancel != nil {
+		v.cancel()
+	}
+
 	v.mu.Lock()
 	for fh, h := range v.openFiles {
 		delete(v.openFiles, fh)

@@ -1411,3 +1411,69 @@ FILE "audio.flac" WAVE
 		t.Errorf("expected fallback to EstimatedSize %d, got %d", st1.Size, stAfterTTL.Size)
 	}
 }
+
+func TestVFS_GhostHandleRaceAvoidanceOnDestroy(t *testing.T) {
+	tmpDir := t.TempDir()
+	albumDir := filepath.Join(tmpDir, "GhostAlbum")
+	if err := os.MkdirAll(albumDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cueContent := `TITLE "Ghost Album"
+FILE "ghost.flac" WAVE
+  TRACK 01 AUDIO
+    TITLE "Ghost Track"
+    INDEX 01 00:00:00
+`
+	if err := os.WriteFile(filepath.Join(albumDir, "ghost.cue"), []byte(cueContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(albumDir, "ghost.flac"), make([]byte, 512), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mock := &cancellingMockCutter{
+		cutStarted: make(chan struct{}),
+		cutDone:    make(chan struct{}),
+	}
+	mgr, err := cutter.NewManager(cutter.Options{
+		Cutter: mock,
+		TTL:    1 * time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fs := New(Options{
+		SourceRoot: tmpDir,
+		Slicer:     mgr,
+	})
+
+	// Start Open in background; it will block inside Acquire/Cut
+	openResult := make(chan int)
+	go func() {
+		code, _ := fs.Open("/GhostAlbum/01. Ghost Track.flac", fuse.O_RDONLY)
+		openResult <- code
+	}()
+
+	// Wait until Cut is actively executing
+	<-mock.cutStarted
+
+	// Trigger Destroy concurrently while Open is in flight
+	fs.Destroy()
+
+	// Open must abort and return an error
+	code := <-openResult
+	if code >= 0 {
+		t.Errorf("expected Open to fail when Destroyed in-flight, got code %d", code)
+	}
+
+	// Verify no ghost handle was left registered in openFiles
+	fs.mu.Lock()
+	openCount := len(fs.openFiles)
+	fs.mu.Unlock()
+
+	if openCount != 0 {
+		t.Errorf("expected 0 open handles in destroyed VFS, got %d", openCount)
+	}
+}

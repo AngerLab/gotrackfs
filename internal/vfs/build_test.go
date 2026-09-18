@@ -73,6 +73,60 @@ FILE "audio.flac" WAVE
 	}
 }
 
+func TestBuildDirState_ArtistInheritsAlbumPerformer(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// PERFORMER only at disc level, tracks have no PERFORMER (valid per CUE spec)
+	cueContent := `PERFORMER "Woodkid"
+TITLE "S16"
+FILE "audio.flac" WAVE
+  TRACK 01 AUDIO
+    TITLE "Goliath"
+    INDEX 01 00:00:00
+  TRACK 02 AUDIO
+    TITLE "Shift"
+    INDEX 01 03:00:00
+  TRACK 03 AUDIO
+    PERFORMER "Someone Else"
+    TITLE "Guest Track"
+    INDEX 01 06:00:00
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "album.cue"), []byte(cueContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "audio.flac"), make([]byte, 1024*1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	dirFi, err := os.Stat(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	state, _, err := buildDirState(tmpDir, dirFi, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == nil || len(state.Albums) != 1 {
+		t.Fatalf("expected 1 album, got %+v", state)
+	}
+
+	expectArtist := map[int]string{
+		1: "Woodkid",      // inherited from album PERFORMER
+		2: "Woodkid",      // inherited from album PERFORMER
+		3: "Someone Else", // track-level PERFORMER wins
+	}
+	for _, vt := range state.Albums[0].Tracks {
+		want := expectArtist[vt.Num]
+		if got := vt.Slice.Tags["artist"]; got != want {
+			t.Errorf("track %02d: artist = %q, want %q", vt.Num, got, want)
+		}
+		if got := vt.Slice.Tags["album_artist"]; got != "Woodkid" {
+			t.Errorf("track %02d: album_artist = %q, want %q", vt.Num, got, "Woodkid")
+		}
+	}
+}
+
 func TestBuildDirState_LogsWarningsOnBrokenFiles(t *testing.T) {
 	tmpDir := t.TempDir()
 

@@ -79,7 +79,7 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger) (*Dir
 
 		totalAudioDuration, durErr := audio.ProbeDuration(audioPath)
 		if durErr != nil {
-			logger.Debug("vfs: failed to probe audio duration from header", "audio", audioPath, "error", durErr)
+			logger.Debug("vfs: failed to probe audio duration", "audio", audioPath, "error", durErr)
 		}
 
 		totalAudioSize := audioFi.Size()
@@ -91,7 +91,7 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger) (*Dir
 				}
 			}
 		} else {
-			// If total duration is known from header, populate the last track's End time if missing
+			// If total duration is known, populate the last track's End time if missing
 			if len(tracks) > 0 {
 				lastIdx := len(tracks) - 1
 				if tracks[lastIdx].End <= tracks[lastIdx].Start && totalAudioDuration > tracks[lastIdx].Start {
@@ -113,14 +113,20 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger) (*Dir
 				title = fmt.Sprintf("Track %02d", tr.Num)
 			}
 
-			estimatedSize := int64(0)
-			if tr.End > tr.Start && totalKnownDuration > 0 {
-				duration := tr.End - tr.Start
-				estimatedSize = int64(float64(totalAudioSize) * (duration / totalKnownDuration))
-			} else {
-				estimatedSize = totalAudioSize / int64(len(tracks))
+			trackDuration := float64(0)
+			if tr.End > tr.Start {
+				trackDuration = tr.End - tr.Start
+			} else if totalKnownDuration > tr.Start {
+				trackDuration = totalKnownDuration - tr.Start
 			}
-			if estimatedSize <= 0 {
+
+			estimatedSize := int64(0)
+			if trackDuration > 0 && totalKnownDuration > 0 {
+				estimatedSize = int64(float64(totalAudioSize) * (trackDuration / totalKnownDuration) * 1.25)
+			} else {
+				estimatedSize = int64(float64(totalAudioSize) / float64(len(tracks)) * 1.25)
+			}
+			if estimatedSize < 1024*1024 {
 				estimatedSize = 1024 * 1024
 			}
 
@@ -211,10 +217,19 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger) (*Dir
 	}
 
 	primaryArtwork := findPrimaryArtwork(parentArtwork)
+	var artworkSize int64
+	if primaryArtwork != "" {
+		if artFi, err := os.Stat(primaryArtwork); err == nil {
+			artworkSize = artFi.Size()
+		}
+	}
 	for _, album := range albums {
 		for i := range album.Tracks {
 			album.Tracks[i].Slice.ArtworkPath = primaryArtwork
 			album.Tracks[i].CutterKey = album.Tracks[i].Slice.Key()
+			if artworkSize > 0 {
+				album.Tracks[i].EstimatedSize += artworkSize
+			}
 		}
 	}
 

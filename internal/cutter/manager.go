@@ -36,7 +36,6 @@ type trackEntry struct {
 	err           error
 	activeWaiters int
 	refCount      int
-	lastUsed      time.Time
 	timer         *time.Timer
 	cancelCut     context.CancelFunc
 }
@@ -235,12 +234,11 @@ func (m *TrackCacheManager) scheduleTTLTimerLocked(key string, entry *trackEntry
 	if entry.timer != nil {
 		return
 	}
-	entry.lastUsed = time.Now()
 	entry.timer = time.AfterFunc(m.ttl, func() {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 
-		if e, stillExists := m.entries[key]; stillExists && e.refCount == 0 {
+		if e, stillExists := m.entries[key]; stillExists && e == entry && e.refCount == 0 {
 			delete(m.entries, key)
 			_ = os.Remove(e.path)
 			m.logger.Debug("cutter: removed expired cached track", "key", key, "path", e.path)

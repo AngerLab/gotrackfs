@@ -35,6 +35,8 @@ SOURCE/Artist/Album/           VIRTUAL/Artist/Album/
 - **Unicode-safe paths** — NFC/NFD normalization handled transparently
   (macOS ↔ Windows ↔ Linux interop), synthetic stable inode numbers.
 - **`--keep-album`** — keep the monolithic audio file visible alongside virtual tracks.
+- **`--max-quality 24/96`** — optionally cap sliced output quality; tracks at or
+  below the cap keep the source format, cuts down to 16 bit get noise-shaped dither.
 
 ## Requirements
 
@@ -67,6 +69,7 @@ gotrackfs ~/Music ./VIRTUAL
 | `-keep-album` | Keep monolithic audio files visible next to virtual tracks |
 | `-allow-other` | Allow other users to access the mount (requires `user_allow_other` in `/etc/fuse.conf`) |
 | `-cache-ttl` | Cache time-to-live for sliced tracks after last close (default `5m`, e.g. `10m`, `30s`) |
+| `-max-quality` | Cap output quality of sliced tracks as `bits/rate`, e.g. `24/96`, `16/44.1` (rate-only `96` works too). Each dimension is lowered only if the source is above the cap; everything at or below stays bit-exact. Depth reductions to 16 bit are dithered (f-weighted noise shaping). Default: empty = original format |
 
 Unmount with `Ctrl+C` (graceful SIGINT/SIGTERM handling included).
 

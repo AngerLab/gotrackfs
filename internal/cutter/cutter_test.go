@@ -515,3 +515,80 @@ func TestTrackCacheManager_CutSucceedsWhenNoWaitersScheduledTTL(t *testing.T) {
 		t.Fatalf("file leaked in cache: still exists after TTL expiration: %s", expectedPath)
 	}
 }
+
+func TestFFmpegCutter_BuildArgs_QualityTargets(t *testing.T) {
+	cutter := &FFmpegCutter{binPath: "ffmpeg"}
+	base := track.Slice{SourceAudioPath: "/music/album.flac", Start: 0, End: 60}
+
+	hasPair := func(args []string, flag, val string) bool {
+		for i, a := range args {
+			if a == flag && i+1 < len(args) && args[i+1] == val {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Default: no targets -> no conversion flags at all.
+	args := cutter.BuildArgs(base, "/tmp/out.flac")
+	for _, forbidden := range []string{"-ar", "-sample_fmt", "-bits_per_raw_sample", "-af"} {
+		if slices.Contains(args, forbidden) {
+			t.Errorf("unconstrained cut must not contain %q, got: %v", forbidden, args)
+		}
+	}
+
+	const soxrFilter = "aresample=resampler=soxr:precision=28"
+	const ditherFilter = "aresample=resampler=swr:dither_method=f_weighted"
+
+	// Rate-only target (24/192 -> 24/96): precise soxr resampler, no dither.
+	req := base
+	req.TargetSampleRate = 96000
+	args = cutter.BuildArgs(req, "/tmp/out.flac")
+	if !hasPair(args, "-ar", "96000") {
+		t.Errorf("expected -ar 96000, got: %v", args)
+	}
+	if !hasPair(args, "-af", soxrFilter) {
+		t.Errorf("expected soxr resampler filter, got: %v", args)
+	}
+	if slices.Contains(args, "-bits_per_raw_sample") {
+		t.Errorf("bit depth must stay untouched, got: %v", args)
+	}
+
+	// Bits-only target to 24 from unknown-precision source: lossless mask, no filter.
+	req = base
+	req.TargetBits = 24
+	args = cutter.BuildArgs(req, "/tmp/out.flac")
+	if !hasPair(args, "-sample_fmt", "s32") || !hasPair(args, "-bits_per_raw_sample", "24") {
+		t.Errorf("expected s32 + bits_per_raw_sample 24, got: %v", args)
+	}
+	if slices.Contains(args, "-ar") || slices.Contains(args, "-af") {
+		t.Errorf("sample rate and filter must stay untouched, got: %v", args)
+	}
+
+	// 16-bit target uses s16 container with noise-shaped dither; swr covers
+	// the rate conversion in the same stage (no soxr filter).
+	req = base
+	req.TargetSampleRate = 44100
+	req.TargetBits = 16
+	args = cutter.BuildArgs(req, "/tmp/out.flac")
+	if !hasPair(args, "-ar", "44100") || !hasPair(args, "-sample_fmt", "s16") || !hasPair(args, "-bits_per_raw_sample", "16") {
+		t.Errorf("expected 44100 + s16 + bpr16, got: %v", args)
+	}
+	if !hasPair(args, "-af", ditherFilter) {
+		t.Errorf("expected dithered swr filter, got: %v", args)
+	}
+	if slices.Contains(args, soxrFilter) {
+		t.Errorf("16-bit cap must use exactly one resample filter, got: %v", args)
+	}
+
+	// 20-bit target uses s32 container and stays undithered.
+	req = base
+	req.TargetBits = 20
+	args = cutter.BuildArgs(req, "/tmp/out.flac")
+	if !hasPair(args, "-sample_fmt", "s32") || !hasPair(args, "-bits_per_raw_sample", "20") {
+		t.Errorf("expected s32 + bpr20, got: %v", args)
+	}
+	if slices.Contains(args, "-af") {
+		t.Errorf("20-bit cap must not add filters, got: %v", args)
+	}
+}

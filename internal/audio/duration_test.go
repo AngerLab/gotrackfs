@@ -102,3 +102,53 @@ func TestProbeWAVDuration_Synthetic(t *testing.T) {
 		t.Errorf("expected duration 5.0, got %f", dur)
 	}
 }
+
+func TestProbeFormat_FlacSynthetic(t *testing.T) {
+	tests := []struct {
+		name  string
+		rate  uint64
+		chans uint64
+		bps   uint64
+	}{
+		{"CD", 44100, 2, 16},
+		{"hi-res", 96000, 2, 24},
+		{"vinyl rip", 192000, 2, 24},
+		{"mono 12", 8000, 1, 12},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			flacPath := filepath.Join(tmpDir, "test.flac")
+
+			var buf bytes.Buffer
+			buf.WriteString("fLaC")
+			buf.Write([]byte{0x80, 0x00, 0x00, 34}) // isLast=1, type=0, len=34
+			var streaminfo [34]byte
+			v := tt.rate<<44 | (tt.chans-1)<<41 | (tt.bps-1)<<36 | 1000
+			binary.BigEndian.PutUint64(streaminfo[10:18], v)
+			buf.Write(streaminfo[:])
+			if err := os.WriteFile(flacPath, buf.Bytes(), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			format, err := ProbeFormat(flacPath)
+			if err != nil {
+				t.Fatalf("ProbeFormat failed: %v", err)
+			}
+			if format.SampleRate != int(tt.rate) || format.Bits != int(tt.bps) || format.Channels != int(tt.chans) {
+				t.Errorf("ProbeFormat = %+v, want rate=%d bits=%d ch=%d", format, tt.rate, tt.bps, tt.chans)
+			}
+		})
+	}
+}
+
+func TestProbeFormat_UnsupportedExt(t *testing.T) {
+	tmpDir := t.TempDir()
+	p := filepath.Join(tmpDir, "track.ogg")
+	if err := os.WriteFile(p, []byte("OggS"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ProbeFormat(p); err == nil {
+		t.Error("expected error for unsupported extension")
+	}
+}

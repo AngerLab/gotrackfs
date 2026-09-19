@@ -4,6 +4,8 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/AngerLab/gotrackfs/internal/track"
+
 	"golang.org/x/sync/singleflight"
 	"golang.org/x/text/unicode/norm"
 )
@@ -14,6 +16,10 @@ type AlbumCache struct {
 	dirs   map[string]*cachedDir
 	sfg    singleflight.Group
 	logger *slog.Logger
+
+	// maxQuality caps the output format of sliced tracks (zero = keep source).
+	// Set once at mount time via vfs.New before any lookup.
+	maxQuality track.Quality
 }
 
 type cachedDir struct {
@@ -62,7 +68,7 @@ func (c *AlbumCache) GetDirState(dirPath string) (*DirState, error) {
 			return cached.state, nil
 		}
 
-		state, facts, err := buildDirState(dirPath, dirFi, c.logger)
+		state, facts, err := buildDirState(dirPath, dirFi, c.logger, c.maxQuality)
 		if err != nil {
 			return nil, err
 		}

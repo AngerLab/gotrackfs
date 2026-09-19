@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/AngerLab/gotrackfs/internal/cutter"
+	"github.com/AngerLab/gotrackfs/internal/track"
 	"github.com/AngerLab/gotrackfs/internal/vfs"
 
 	"github.com/winfsp/cgofuse/fuse"
@@ -23,11 +24,14 @@ func main() {
 		keepAlbum  bool
 		allowOther bool
 		cacheTTL   time.Duration
+
+		maxQualitySpec string
 	)
 	flag.BoolVar(&debug, "debug", false, "Enable FUSE and VFS debug logging")
 	flag.BoolVar(&keepAlbum, "keep-album", false, "Keep monolithic audio file visible alongside virtual tracks")
 	flag.BoolVar(&allowOther, "allow-other", false, "Allow other users to access the mount (requires user_allow_other in /etc/fuse.conf)")
 	flag.DurationVar(&cacheTTL, "cache-ttl", 5*time.Minute, "Cache time-to-live for sliced tracks after last close (e.g. 5m, 30s)")
+	flag.StringVar(&maxQualitySpec, "max-quality", "", "Cap output quality of sliced tracks, e.g. \"24/96\" (bits/rate); tracks at or below the cap keep their original format (default: unlimited)")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [options] <source_dir> <mount_point>\n\nOptions:\n", filepath.Base(os.Args[0]))
 		flag.PrintDefaults()
@@ -45,6 +49,12 @@ func main() {
 		os.Exit(2)
 	}
 
+	maxQuality, err := track.ParseQuality(maxQualitySpec)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: -max-quality: %v\n", err)
+		os.Exit(2)
+	}
+
 	sourceDir := args[0]
 	mountPoint := args[1]
 
@@ -54,6 +64,9 @@ func main() {
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
 	slog.SetDefault(logger)
+	if !maxQuality.Unset() {
+		logger.Info("output quality cap enabled", "max_quality", maxQuality.String(), "note", "tracks at or below the cap keep their original format")
+	}
 
 	absSource, err := filepath.Abs(sourceDir)
 	if err != nil {
@@ -97,6 +110,7 @@ func main() {
 		Debug:      debug,
 		Logger:     logger,
 		Slicer:     slicer,
+		MaxQuality: maxQuality,
 	})
 	host := fuse.NewFileSystemHost(fs)
 

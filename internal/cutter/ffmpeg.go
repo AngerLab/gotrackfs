@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"strconv"
 	"time"
 
 	"github.com/AngerLab/gotrackfs/internal/track"
@@ -80,6 +81,40 @@ func (c *FFmpegCutter) BuildArgs(req track.Slice, outputPath string) []string {
 
 	// Output codec: FLAC with fast compression
 	args = append(args, "-c:a", "flac", "-compression_level", "1")
+
+	// Quality cap targets (computed by the VFS at build time).
+	// Absent targets mean the source is kept as-is.
+	switch {
+	case req.TargetBits > 0 && req.TargetBits <= 16:
+		// Requantizing to 16-bit (or shallower) is the only lossy step of a
+		// quality cap, so push the depth conversion through swresample with
+		// f-weighted noise shaping: the quantization error becomes
+		// decorrelated noise pushed up to frequencies the ear ignores,
+		// instead of signal-correlated distortion (crackle in fades,
+		// harmonics on quiet tones). swr also covers any rate conversion in
+		// the same stage; for 192->96 material its default profile is more
+		// than adequate.
+		args = append(args, "-af", "aresample=resampler=swr:dither_method=f_weighted")
+	case req.TargetSampleRate > 0:
+		// Rate-only cap: high-precision soxr resampler, depth untouched.
+		args = append(args, "-af", "aresample=resampler=soxr:precision=28")
+	}
+	if req.TargetSampleRate > 0 {
+		args = append(args, "-ar", strconv.Itoa(req.TargetSampleRate))
+	}
+	if req.TargetBits > 0 {
+		if req.TargetBits <= 16 {
+			args = append(args, "-sample_fmt", "s16")
+		} else {
+			// FLAC stores 17-24 bits in an s32 container; the encoder writes
+			// the true depth via bits_per_raw_sample. Depths above 16 come
+			// from 24-bit masters, where the cap is a mask the encoder
+			// applies deterministically; swresample has no s20 format to
+			// dither into, so those stay undithered.
+			args = append(args, "-sample_fmt", "s32")
+		}
+		args = append(args, "-bits_per_raw_sample", strconv.Itoa(req.TargetBits))
+	}
 
 	// Metadata tags (sorted deterministically)
 	if len(req.Tags) > 0 {

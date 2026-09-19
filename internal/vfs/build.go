@@ -34,7 +34,8 @@ type dirFacts struct {
 
 // buildDirState discovers CUE and audio files in dirPath, parses them,
 // and computes the DirState along with dirFacts for caching.
-func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger) (*DirState, *dirFacts, error) {
+// maxQuality optionally caps the sliced-track output format (zero = keep source).
+func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger, maxQuality track.Quality) (*DirState, *dirFacts, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -91,6 +92,20 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger) (*Dir
 		totalAudioDuration, durErr := audio.ProbeDuration(audioPath)
 		if durErr != nil {
 			logger.Debug("vfs: failed to probe audio duration", "audio", audioPath, "error", durErr)
+		}
+
+		// Quality cap: probe the source format once per album and lower cuts
+		// that exceed it. Unset cap leaves every slice in the source format.
+		var targetRate, targetBits int
+		if !maxQuality.Unset() {
+			srcFmt, fmtErr := audio.ProbeFormat(audioPath)
+			if fmtErr != nil {
+				logger.Debug("vfs: failed to probe audio format, applying quality cap blindly", "audio", audioPath, "error", fmtErr)
+			}
+			targetRate, targetBits = maxQuality.Plan(srcFmt.SampleRate, srcFmt.Bits)
+			if targetRate == 0 && targetBits == 0 {
+				logger.Debug("vfs: source already at or below quality cap", "audio", audioPath, "cap", maxQuality.String())
+			}
 		}
 
 		totalAudioSize := audioFi.Size()
@@ -178,12 +193,14 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger) (*Dir
 				Performer:     tr.Performer,
 				EstimatedSize: estimatedSize,
 				Slice: track.Slice{
-					SourceAudioPath: audioPath,
-					SourceModTime:   audioFi.ModTime(),
-					SourceSize:      audioFi.Size(),
-					Start:           tr.Start,
-					End:             tr.End,
-					Tags:            tags,
+					SourceAudioPath:  audioPath,
+					SourceModTime:    audioFi.ModTime(),
+					SourceSize:       audioFi.Size(),
+					Start:            tr.Start,
+					End:              tr.End,
+					TargetSampleRate: targetRate,
+					TargetBits:       targetBits,
+					Tags:             tags,
 				},
 			}
 		}

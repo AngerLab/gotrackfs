@@ -22,6 +22,11 @@ type Slice struct {
 	End             float64 // End offset in seconds (0 means until EOF)
 	ArtworkPath     string  // Optional path to cover image to embed
 
+	// Output targets derived from the mount's quality cap and the probed
+	// source format. Zeros mean "keep the source format untouched".
+	TargetSampleRate int // Resample to this rate (Hz) when the source is above the cap
+	TargetBits       int // Encode at this bit depth when the source is above the cap
+
 	Tags map[string]string // Key-value metadata tags (e.g. title, artist, album, track, date, genre, disc)
 }
 
@@ -40,13 +45,15 @@ func (s Slice) Tag(key string) string {
 // The key is a 16-character hex prefix of SHA-256.
 func (s Slice) Key() string {
 	hasher := sha256.New()
-	buf := fmt.Appendf(nil, "%s:%d:%d:%.4f:%.4f:%s",
+	buf := fmt.Appendf(nil, "%s:%d:%d:%.4f:%.4f:%s:t%d:b%d",
 		s.SourceAudioPath,
 		s.SourceModTime.UnixNano(),
 		s.SourceSize,
 		s.Start,
 		s.End,
 		s.ArtworkPath,
+		s.TargetSampleRate,
+		s.TargetBits,
 	)
 	if len(s.Tags) > 0 {
 		keys := make([]string, 0, len(s.Tags))

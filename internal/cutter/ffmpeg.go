@@ -19,16 +19,16 @@ type Cutter interface {
 	Cut(ctx context.Context, req track.Slice, outputPath string) error
 }
 
-// FFmpegCutter invokes the external ffmpeg binary to slice audio and apply metadata.
-type FFmpegCutter struct {
+// FFmpeg invokes the external ffmpeg binary to slice audio and apply metadata.
+type FFmpeg struct {
 	binPath string
 	logger  *slog.Logger
 	sem     chan struct{}
 	timeout time.Duration
 }
 
-// NewFFmpegCutter creates a new FFmpegCutter. If binPath is empty, it searches for "ffmpeg" in PATH.
-func NewFFmpegCutter(binPath string, logger *slog.Logger) (*FFmpegCutter, error) {
+// NewFFmpeg creates a new FFmpeg cutter. If binPath is empty, it searches for "ffmpeg" in PATH.
+func NewFFmpeg(binPath string, logger *slog.Logger) (*FFmpeg, error) {
 	if binPath == "" {
 		var err error
 		binPath, err = exec.LookPath("ffmpeg")
@@ -39,7 +39,7 @@ func NewFFmpegCutter(binPath string, logger *slog.Logger) (*FFmpegCutter, error)
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &FFmpegCutter{
+	return &FFmpeg{
 		binPath: binPath,
 		logger:  logger,
 		sem:     make(chan struct{}, 2), // Default: max 2 concurrent ffmpeg cuts
@@ -48,7 +48,7 @@ func NewFFmpegCutter(binPath string, logger *slog.Logger) (*FFmpegCutter, error)
 }
 
 // SetMaxConcurrency configures the maximum concurrent ffmpeg cut operations.
-func (c *FFmpegCutter) SetMaxConcurrency(n int) {
+func (c *FFmpeg) SetMaxConcurrency(n int) {
 	if n <= 0 {
 		n = 1
 	}
@@ -56,12 +56,12 @@ func (c *FFmpegCutter) SetMaxConcurrency(n int) {
 }
 
 // SetTimeout configures the timeout for ffmpeg cut operations.
-func (c *FFmpegCutter) SetTimeout(d time.Duration) {
+func (c *FFmpeg) SetTimeout(d time.Duration) {
 	c.timeout = d
 }
 
 // BuildArgs constructs the CLI arguments for ffmpeg.
-func (c *FFmpegCutter) BuildArgs(req track.Slice, outputPath string) []string {
+func (c *FFmpeg) BuildArgs(req track.Slice, outputPath string) []string {
 	var args []string
 	args = append(args, "-y", "-v", "error") // overwrite output, suppress non-error logs
 
@@ -134,7 +134,7 @@ func (c *FFmpegCutter) BuildArgs(req track.Slice, outputPath string) []string {
 }
 
 // execCut runs ffmpeg with args constructed from req and returns the combined output.
-func (c *FFmpegCutter) execCut(ctx context.Context, req track.Slice, outputPath string) ([]byte, error) {
+func (c *FFmpeg) execCut(ctx context.Context, req track.Slice, outputPath string) ([]byte, error) {
 	args := c.BuildArgs(req, outputPath)
 	cmd := exec.CommandContext(ctx, c.binPath, args...)
 	return cmd.CombinedOutput()
@@ -143,7 +143,7 @@ func (c *FFmpegCutter) execCut(ctx context.Context, req track.Slice, outputPath 
 // Cut executes ffmpeg to generate the sliced track.
 // If embedding artwork fails (e.g. corrupt or unsupported image format),
 // it logs a warning and gracefully retries cutting audio without artwork.
-func (c *FFmpegCutter) Cut(ctx context.Context, req track.Slice, outputPath string) error {
+func (c *FFmpeg) Cut(ctx context.Context, req track.Slice, outputPath string) error {
 	if c.timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, c.timeout)

@@ -51,7 +51,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	bits, err := track.ParseBits(maxBits)
+	bits, err := track.ValidateBits(maxBits)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: --max-bits: %v\n", err)
 		os.Exit(2)
@@ -96,7 +96,7 @@ func main() {
 
 	// Initialize audio cutter if ffmpeg is available
 	var slicer vfs.TrackSlicer
-	ffmpegCutter, err := cutter.NewFFmpegCutter("", logger)
+	ffmpegCutter, err := cutter.NewFFmpeg("", logger)
 	if err != nil {
 		logger.Warn("ffmpeg not found in PATH: audio slicing is disabled (install ffmpeg to enable virtual track playback)", "error", err)
 	} else {
@@ -140,8 +140,6 @@ func main() {
 		host.Unmount()
 	}()
 
-	maxBitsStr, maxRateStr := maxQuality.HumanString()
-
 	fmt.Printf("Mounting gotrackfs:\n"+
 		"  Source:      %s\n"+
 		"  Mount Point: %s\n"+
@@ -150,7 +148,7 @@ func main() {
 		"  Cache TTL:   %v\n"+
 		"  Keep Album:  %t\n"+
 		"Press Ctrl+C to unmount.\n",
-		absSource, absMount, maxBitsStr, maxRateStr, cacheTTL, keepAlbum)
+		absSource, absMount, maxQuality.FormatBits(), maxQuality.FormatRate(), cacheTTL, keepAlbum)
 
 	if !host.Mount(absMount, fuseOpts) {
 		log.Fatalf("failed to mount FUSE filesystem at %s", absMount)

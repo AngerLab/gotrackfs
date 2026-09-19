@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestParseBits(t *testing.T) {
+func TestValidateBits(t *testing.T) {
 	tests := []struct {
 		bits    int
 		want    int
@@ -20,19 +20,19 @@ func TestParseBits(t *testing.T) {
 		{bits: -1, wantErr: "not supported"},
 	}
 	for _, tt := range tests {
-		got, err := ParseBits(tt.bits)
+		got, err := ValidateBits(tt.bits)
 		if tt.wantErr != "" {
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Errorf("ParseBits(%d): error = %v, want error containing %q", tt.bits, err, tt.wantErr)
+				t.Errorf("ValidateBits(%d): error = %v, want error containing %q", tt.bits, err, tt.wantErr)
 			}
 			continue
 		}
 		if err != nil {
-			t.Errorf("ParseBits(%d): unexpected error %v", tt.bits, err)
+			t.Errorf("ValidateBits(%d): unexpected error %v", tt.bits, err)
 			continue
 		}
 		if got != tt.want {
-			t.Errorf("ParseBits(%d) = %d, want %d", tt.bits, got, tt.want)
+			t.Errorf("ValidateBits(%d) = %d, want %d", tt.bits, got, tt.want)
 		}
 	}
 }
@@ -120,7 +120,7 @@ func TestQualityPlan(t *testing.T) {
 	}
 }
 
-func TestQualityHumanString(t *testing.T) {
+func TestQualityFormatBitsAndRate(t *testing.T) {
 	cases := []struct {
 		q        Quality
 		wantBits string
@@ -133,9 +133,10 @@ func TestQualityHumanString(t *testing.T) {
 		{Quality{SampleRate: 48000}, "unlimited", "48 kHz (48000 Hz)"},
 	}
 	for _, c := range cases {
-		gotBits, gotRate := c.q.HumanString()
+		gotBits := c.q.FormatBits()
+		gotRate := c.q.FormatRate()
 		if gotBits != c.wantBits || gotRate != c.wantRate {
-			t.Errorf("Quality%+v.HumanString() = (%q, %q), want (%q, %q)",
+			t.Errorf("Quality%+v: FormatBits()=%q, FormatRate()=%q, want (%q, %q)",
 				c.q, gotBits, gotRate, c.wantBits, c.wantRate)
 		}
 	}

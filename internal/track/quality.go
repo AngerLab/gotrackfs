@@ -34,25 +34,27 @@ func (q Quality) String() string {
 	return bits + "/" + rate
 }
 
-// HumanString returns formatted human-readable descriptions of the bit depth and sample rate caps (e.g. "24-bit" and "96 kHz (96000 Hz)").
-func (q Quality) HumanString() (bitsStr, rateStr string) {
-	bitsStr = "unlimited"
-	if q.Bits > 0 {
-		bitsStr = fmt.Sprintf("%d-bit", q.Bits)
+// FormatBits returns a human-readable description of the bit depth cap (e.g. "24-bit" or "unlimited").
+func (q Quality) FormatBits() string {
+	if q.Bits <= 0 {
+		return "unlimited"
 	}
-	rateStr = "unlimited"
-	if q.SampleRate > 0 {
-		if q.SampleRate%1000 == 0 {
-			rateStr = fmt.Sprintf("%d kHz (%d Hz)", q.SampleRate/1000, q.SampleRate)
-		} else {
-			rateStr = fmt.Sprintf("%.1f kHz (%d Hz)", float64(q.SampleRate)/1000, q.SampleRate)
-		}
-	}
-	return bitsStr, rateStr
+	return fmt.Sprintf("%d-bit", q.Bits)
 }
 
-// ParseBits validates a max-bits cap (only 16 or 24 allowed, 0 = unlimited).
-func ParseBits(b int) (int, error) {
+// FormatRate returns a human-readable description of the sample rate cap (e.g. "96 kHz (96000 Hz)" or "unlimited").
+func (q Quality) FormatRate() string {
+	if q.SampleRate <= 0 {
+		return "unlimited"
+	}
+	if q.SampleRate%1000 == 0 {
+		return fmt.Sprintf("%d kHz (%d Hz)", q.SampleRate/1000, q.SampleRate)
+	}
+	return fmt.Sprintf("%.1f kHz (%d Hz)", float64(q.SampleRate)/1000, q.SampleRate)
+}
+
+// ValidateBits validates a max-bits cap (only 16 or 24 allowed, 0 = unlimited).
+func ValidateBits(b int) (int, error) {
 	if b == 0 || b == 16 || b == 24 {
 		return b, nil
 	}
@@ -61,6 +63,9 @@ func ParseBits(b int) (int, error) {
 
 // ParseRate parses a sample-rate cap string (e.g. "44.1", "48", "96", "44.1k", "96kHz", "44100", "96000").
 // Empty string or "0" means unlimited (returns 0, nil).
+//
+// Values <= 384 or containing a decimal point without an explicit unit suffix are interpreted as kHz
+// (e.g. "96" -> 96000 Hz, "44.1" -> 44100 Hz), whereas values > 384 without suffix are interpreted as Hz (e.g. "96000").
 func ParseRate(spec string) (int, error) {
 	raw := strings.TrimSpace(spec)
 	if raw == "" || raw == "0" {

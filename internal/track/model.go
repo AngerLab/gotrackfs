@@ -6,9 +6,9 @@ package track
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"time"
 )
 
@@ -46,22 +46,40 @@ func (s Slice) Tag(key string) string {
 // The key is a 16-character hex prefix of SHA-256.
 func (s Slice) Key() string {
 	hasher := sha256.New()
-	fmt.Fprintf(hasher, "%s:%d:%d:%.4f:%.4f:%s:t%d:b%d",
-		s.SourceAudioPath,
-		s.SourceModTime.UnixNano(),
-		s.SourceSize,
-		s.Start,
-		s.End,
-		s.ArtworkPath,
-		s.TargetSampleRate,
-		s.TargetBits,
-	)
+	var buf [256]byte
+	b := buf[:0]
+
+	b = append(b, s.SourceAudioPath...)
+	b = append(b, ':')
+	b = strconv.AppendInt(b, s.SourceModTime.UnixNano(), 10)
+	b = append(b, ':')
+	b = strconv.AppendInt(b, s.SourceSize, 10)
+	b = append(b, ':')
+	b = strconv.AppendFloat(b, s.Start, 'f', 4, 64)
+	b = append(b, ':')
+	b = strconv.AppendFloat(b, s.End, 'f', 4, 64)
+	b = append(b, ':')
+	b = append(b, s.ArtworkPath...)
+	b = append(b, ":t"...)
+	b = strconv.AppendInt(b, int64(s.TargetSampleRate), 10)
+	b = append(b, ":b"...)
+	b = strconv.AppendInt(b, int64(s.TargetBits), 10)
+	hasher.Write(b)
+
 	if len(s.Tags) > 0 {
 		for _, k := range slices.Sorted(maps.Keys(s.Tags)) {
 			if v := s.Tags[k]; v != "" {
-				fmt.Fprintf(hasher, ":%s=%s", k, v)
+				b = buf[:0]
+				b = append(b, ':')
+				b = append(b, k...)
+				b = append(b, '=')
+				b = append(b, v...)
+				hasher.Write(b)
 			}
 		}
 	}
-	return hex.EncodeToString(hasher.Sum(nil))[:16]
+
+	var sum [sha256.Size]byte
+	digest := hasher.Sum(sum[:0])
+	return hex.EncodeToString(digest[:8])
 }

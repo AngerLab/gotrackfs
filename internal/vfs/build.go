@@ -170,8 +170,12 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger, maxQu
 			if title != "" {
 				tags["title"] = title
 			}
-			if tr.Performer != "" {
-				tags["artist"] = tr.Performer
+			artist := tr.Performer
+			if artist == "" {
+				artist = sheet.Performer
+			}
+			if artist != "" {
+				tags["artist"] = artist
 			}
 			if sheet.Performer != "" {
 				tags["album_artist"] = sheet.Performer

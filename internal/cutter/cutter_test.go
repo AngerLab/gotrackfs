@@ -34,8 +34,8 @@ func (m *mockCutter) Cut(ctx context.Context, req track.Slice, outputPath string
 	return os.WriteFile(outputPath, []byte("SLICED_AUDIO_DATA"), 0644)
 }
 
-func TestFFmpegCutter_BuildArgs(t *testing.T) {
-	cutter := &FFmpegCutter{binPath: "ffmpeg"}
+func TestFFmpeg_BuildArgs(t *testing.T) {
+	cutter := &FFmpeg{binPath: "ffmpeg"}
 
 	req := track.Slice{
 		SourceAudioPath: "/music/album.flac",
@@ -283,7 +283,7 @@ func TestTrackSlice_KeyDerivesFromSourceFacts(t *testing.T) {
 	}
 }
 
-func TestFFmpegCutter_GracefulDegradationOnCorruptArtwork(t *testing.T) {
+func TestFFmpeg_GracefulDegradationOnCorruptArtwork(t *testing.T) {
 	ffmpegPath, err := exec.LookPath("ffmpeg")
 	if err != nil {
 		t.Skip("ffmpeg not installed, skipping test")
@@ -305,7 +305,7 @@ func TestFFmpegCutter_GracefulDegradationOnCorruptArtwork(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cutter, err := NewFFmpegCutter(ffmpegPath, nil)
+	cutter, err := NewFFmpeg(ffmpegPath, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,8 +333,8 @@ func TestFFmpegCutter_GracefulDegradationOnCorruptArtwork(t *testing.T) {
 	}
 }
 
-func TestFFmpegCutter_ConcurrencyAndTimeout(t *testing.T) {
-	cutter, err := NewFFmpegCutter("", nil)
+func TestFFmpeg_ConcurrencyAndTimeout(t *testing.T) {
+	cutter, err := NewFFmpeg("", nil)
 	if err != nil {
 		t.Skipf("ffmpeg not installed: %v", err)
 	}
@@ -519,8 +519,8 @@ func TestTrackCacheManager_CutSucceedsWhenNoWaitersScheduledTTL(t *testing.T) {
 	}
 }
 
-func TestFFmpegCutter_BuildArgs_QualityTargets(t *testing.T) {
-	cutter := &FFmpegCutter{binPath: "ffmpeg"}
+func TestFFmpeg_BuildArgs_QualityTargets(t *testing.T) {
+	cutter := &FFmpeg{binPath: "ffmpeg"}
 	base := track.Slice{SourceAudioPath: "/music/album.flac", Start: 0, End: 60}
 
 	hasPair := func(args []string, flag, val string) bool {
@@ -596,7 +596,7 @@ func TestFFmpegCutter_BuildArgs_QualityTargets(t *testing.T) {
 	}
 }
 
-func TestFFmpegCutter_RealFFmpeg_QualityDownsample(t *testing.T) {
+func TestFFmpeg_RealFFmpeg_QualityDownsample(t *testing.T) {
 	ffmpegPath, err := exec.LookPath("ffmpeg")
 	if err != nil {
 		t.Skip("ffmpeg not installed in PATH, skipping real ffmpeg test")
@@ -628,9 +628,9 @@ func TestFFmpegCutter_RealFFmpeg_QualityDownsample(t *testing.T) {
 		t.Fatalf("expected source 192000Hz/24bit, got %dHz/%dbit", srcFmt.SampleRate, srcFmt.Bits)
 	}
 
-	cutter, err := NewFFmpegCutter(ffmpegPath, nil)
+	cutter, err := NewFFmpeg(ffmpegPath, nil)
 	if err != nil {
-		t.Fatalf("NewFFmpegCutter failed: %v", err)
+		t.Fatalf("NewFFmpeg failed: %v", err)
 	}
 
 	artworkPath := filepath.Join(tmpDir, "cover.jpg")

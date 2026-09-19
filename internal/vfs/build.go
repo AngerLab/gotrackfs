@@ -25,6 +25,12 @@ const (
 	// minEstimatedTrackFloor provides a reasonable minimum size floor (1 MB) for very short tracks
 	// or corrupted estimates to prevent undersized buffer allocations by media players.
 	minEstimatedTrackFloor = 1024 * 1024
+
+	// wavToFlacSizeRatio approximates how much a raw PCM WAV shrinks when sliced
+	// into a FLAC (lossless) track. Slices are always written as FLAC, so WAV
+	// sources would otherwise be overestimated by the raw PCM size. ~0.6 is a
+	// conservative average for typical music content.
+	wavToFlacSizeRatio = 0.60
 )
 
 // dirFacts captures directory metadata required for cache validation.
@@ -114,8 +120,8 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger, maxQu
 			qualityRatio *= float64(targetBits) / float64(srcFmt.Bits)
 		}
 		if ext := strings.ToLower(filepath.Ext(audioPath)); ext == ".wav" || ext == ".wave" {
-			// WAV is uncompressed PCM; FLAC encodes it to ~60% of raw PCM size.
-			qualityRatio *= 0.60
+			// WAV is uncompressed PCM; FLAC encodes it down to ~60% of the raw bytes.
+			qualityRatio *= wavToFlacSizeRatio
 		}
 
 		totalAudioSize := audioFi.Size()

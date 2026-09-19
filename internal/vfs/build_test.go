@@ -311,4 +311,3 @@ FILE "audio.flac" WAVE
 			ratio, expectedRatio, estNoCap, estCap)
 	}
 }
-

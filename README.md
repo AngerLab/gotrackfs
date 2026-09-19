@@ -65,12 +65,12 @@ gotrackfs ~/Music ./VIRTUAL
 
 | Flag | Description |
 |------|-------------|
-| `-debug` | Verbose FUSE and VFS debug logging |
-| `-keep-album` | Keep monolithic audio files visible next to virtual tracks |
-| `-allow-other` | Allow other users to access the mount (requires `user_allow_other` in `/etc/fuse.conf`) |
-| `-cache-ttl` | Cache time-to-live for sliced tracks after last close (default `5m`, e.g. `10m`, `30s`) |
-| `-max-rate` | Cap sample rate of sliced tracks in kHz (e.g. `44.1`, `48`, `96`, `192`) or Hz (`96000`). Lowered only if source exceeds the cap; sources at or below stay bit-exact. Default: unlimited |
-| `-max-bits` | Cap bit depth of sliced tracks (`16` or `24`). Reductions to 16-bit use noise-shaped dither (`f_weighted`). Default: unlimited |
+| `--debug` | Verbose FUSE and VFS debug logging |
+| `--keep-album` | Keep monolithic audio files visible next to virtual tracks |
+| `--allow-other` | Allow other users to access the mount (requires `user_allow_other` in `/etc/fuse.conf`) |
+| `--cache-ttl` | Cache time-to-live for sliced tracks after last close (default `5m`, e.g. `10m`, `30s`) |
+| `--max-rate` | Cap sample rate of sliced tracks in kHz (e.g. `44.1`, `48`, `96`, `192`) or Hz (`96000`). Lowered only if source exceeds the cap; sources at or below stay bit-exact. Default: unlimited |
+| `--max-bits` | Cap bit depth of sliced tracks (`16` or `24`). Reductions to 16-bit use noise-shaped dither (`f_weighted`). Default: unlimited |
 
 Unmount with `Ctrl+C` (graceful SIGINT/SIGTERM handling included).
 

@@ -13,6 +13,6 @@ src="$1"
 dst="$2"
 shift 2
 
-# -allow-other is required so that the host user (outside the container)
+# --allow-other is required so that the host user (outside the container)
 # can see the mount through the /dst bind mount.
-exec /usr/local/bin/gotrackfs -allow-other "$@" "$src" "$dst"
+exec /usr/local/bin/gotrackfs --allow-other "$@" "$src" "$dst"

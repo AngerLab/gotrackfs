@@ -96,8 +96,8 @@ func (c *FFmpegCutter) BuildArgs(req track.Slice, outputPath string) []string {
 		// than adequate.
 		args = append(args, "-af", "aresample=resampler=swr:dither_method=f_weighted")
 	case req.TargetSampleRate > 0:
-		// Rate-only cap: high-precision soxr resampler, depth untouched.
-		args = append(args, "-af", "aresample=resampler=soxr:precision=28")
+		// Rate-only cap (or rate cap with bit depth > 16): high-precision 64-tap swr resampler, depth untouched.
+		args = append(args, "-af", "aresample=resampler=swr:filter_size=64:phase_shift=12:cutoff=0.949")
 	}
 	if req.TargetSampleRate > 0 {
 		args = append(args, "-ar", strconv.Itoa(req.TargetSampleRate))

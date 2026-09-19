@@ -164,7 +164,7 @@ FILE "audio.flac" WAVE
 		{"24/96 from 24/192", track.Quality{Bits: 24, SampleRate: 96000}, 192000, 24, 96000, 0},
 		{"24/96 from 16/44.1 untouched", track.Quality{Bits: 24, SampleRate: 96000}, 44100, 16, 0, 0},
 		{"16/44.1 from 24/192", track.Quality{Bits: 16, SampleRate: 44100}, 192000, 24, 44100, 16},
-		{"broken header applies cap blindly", track.Quality{Bits: 16, SampleRate: 48000}, 0, 0, 48000, 16},
+		{"broken header does not upsample (keeps original)", track.Quality{Bits: 16, SampleRate: 48000}, 0, 0, 0, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

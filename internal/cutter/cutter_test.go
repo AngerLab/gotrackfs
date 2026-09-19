@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AngerLab/gotrackfs/internal/audio"
 	"github.com/AngerLab/gotrackfs/internal/track"
 )
 
@@ -537,18 +538,18 @@ func TestFFmpegCutter_BuildArgs_QualityTargets(t *testing.T) {
 		}
 	}
 
-	const soxrFilter = "aresample=resampler=soxr:precision=28"
+	const kaiserFilter = "aresample=resampler=swr:filter_size=64:phase_shift=12:cutoff=0.949"
 	const ditherFilter = "aresample=resampler=swr:dither_method=f_weighted"
 
-	// Rate-only target (24/192 -> 24/96): precise soxr resampler, no dither.
+	// Rate-only target (24/192 -> 24/96): precise 64-tap swr Kaiser resampler, no dither.
 	req := base
 	req.TargetSampleRate = 96000
 	args = cutter.BuildArgs(req, "/tmp/out.flac")
 	if !hasPair(args, "-ar", "96000") {
 		t.Errorf("expected -ar 96000, got: %v", args)
 	}
-	if !hasPair(args, "-af", soxrFilter) {
-		t.Errorf("expected soxr resampler filter, got: %v", args)
+	if !hasPair(args, "-af", kaiserFilter) {
+		t.Errorf("expected swr Kaiser resampler filter, got: %v", args)
 	}
 	if slices.Contains(args, "-bits_per_raw_sample") {
 		t.Errorf("bit depth must stay untouched, got: %v", args)
@@ -566,7 +567,7 @@ func TestFFmpegCutter_BuildArgs_QualityTargets(t *testing.T) {
 	}
 
 	// 16-bit target uses s16 container with noise-shaped dither; swr covers
-	// the rate conversion in the same stage (no soxr filter).
+	// the rate conversion in the same stage (no separate Kaiser filter).
 	req = base
 	req.TargetSampleRate = 44100
 	req.TargetBits = 16
@@ -577,7 +578,7 @@ func TestFFmpegCutter_BuildArgs_QualityTargets(t *testing.T) {
 	if !hasPair(args, "-af", ditherFilter) {
 		t.Errorf("expected dithered swr filter, got: %v", args)
 	}
-	if slices.Contains(args, soxrFilter) {
+	if slices.Contains(args, kaiserFilter) {
 		t.Errorf("16-bit cap must use exactly one resample filter, got: %v", args)
 	}
 
@@ -590,5 +591,101 @@ func TestFFmpegCutter_BuildArgs_QualityTargets(t *testing.T) {
 	}
 	if slices.Contains(args, "-af") {
 		t.Errorf("20-bit cap must not add filters, got: %v", args)
+	}
+}
+
+func TestFFmpegCutter_RealFFmpeg_QualityDownsample(t *testing.T) {
+	ffmpegPath, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg not installed in PATH, skipping real ffmpeg test")
+	}
+
+	tmpDir := t.TempDir()
+	sourceAudio := filepath.Join(tmpDir, "source_192_24.flac")
+
+	// Generate 1-second synthetic 192kHz / 24-bit FLAC using ffmpeg
+	cmd := exec.Command(ffmpegPath, "-y",
+		"-f", "lavfi",
+		"-i", "sine=frequency=440:sample_rate=192000:duration=1",
+		"-c:a", "flac",
+		"-sample_fmt", "s32",
+		"-bits_per_raw_sample", "24",
+		sourceAudio,
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to generate synthetic 192k/24b flac: %v (out: %s)", err, out)
+	}
+
+	// Verify source audio properties
+	srcFmt, err := audio.ProbeFormat(sourceAudio)
+	if err != nil {
+		t.Fatalf("failed to probe source audio format: %v", err)
+	}
+	if srcFmt.SampleRate != 192000 || srcFmt.Bits != 24 {
+		t.Fatalf("expected source 192000Hz/24bit, got %dHz/%dbit", srcFmt.SampleRate, srcFmt.Bits)
+	}
+
+	cutter, err := NewFFmpegCutter(ffmpegPath, nil)
+	if err != nil {
+		t.Fatalf("NewFFmpegCutter failed: %v", err)
+	}
+
+	tests := []struct {
+		name               string
+		targetSampleRate   int
+		targetBits         int
+		expectedSampleRate int
+		expectedBits       int
+	}{
+		{
+			name:               "Downsample to 96kHz 24bit (rate only)",
+			targetSampleRate:   96000,
+			targetBits:         0,
+			expectedSampleRate: 96000,
+			expectedBits:       24,
+		},
+		{
+			name:               "Downsample to 96kHz 24bit (explicit rate and bits)",
+			targetSampleRate:   96000,
+			targetBits:         24,
+			expectedSampleRate: 96000,
+			expectedBits:       24,
+		},
+		{
+			name:               "Downsample to 44.1kHz 16bit (rate and dithered 16bit)",
+			targetSampleRate:   44100,
+			targetBits:         16,
+			expectedSampleRate: 44100,
+			expectedBits:       16,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			outputPath := filepath.Join(tmpDir, tt.name+".flac")
+			req := track.Slice{
+				SourceAudioPath:  sourceAudio,
+				Start:            0,
+				End:              0.5,
+				TargetSampleRate: tt.targetSampleRate,
+				TargetBits:       tt.targetBits,
+			}
+
+			if err := cutter.Cut(context.Background(), req, outputPath); err != nil {
+				t.Fatalf("cutter.Cut failed: %v", err)
+			}
+
+			outFmt, err := audio.ProbeFormat(outputPath)
+			if err != nil {
+				t.Fatalf("failed to probe output audio format: %v", err)
+			}
+
+			if outFmt.SampleRate != tt.expectedSampleRate {
+				t.Errorf("expected sample rate %d, got %d", tt.expectedSampleRate, outFmt.SampleRate)
+			}
+			if outFmt.Bits != tt.expectedBits {
+				t.Errorf("expected bit depth %d, got %d", tt.expectedBits, outFmt.Bits)
+			}
+		})
 	}
 }

@@ -6,44 +6,72 @@ import (
 	"time"
 )
 
-func TestParseQuality(t *testing.T) {
+func TestParseBits(t *testing.T) {
 	tests := []struct {
-		spec    string
-		want    Quality
+		bits    int
+		want    int
 		wantErr string
 	}{
-		{spec: "", want: Quality{}},
-		{spec: "24/96", want: Quality{Bits: 24, SampleRate: 96000}},
-		{spec: "24/96000", want: Quality{Bits: 24, SampleRate: 96000}},
-		{spec: "16/44.1", want: Quality{Bits: 16, SampleRate: 44100}},
-		{spec: "16/44100", want: Quality{Bits: 16, SampleRate: 44100}},
-		{spec: " 20 / 88.2 ", want: Quality{Bits: 20, SampleRate: 88200}},
-		{spec: "96", want: Quality{SampleRate: 96000}},
-		{spec: "192000", want: Quality{SampleRate: 192000}},
-		{spec: "22/96", wantErr: "legal FLAC depth"},
-		{spec: "32/96", wantErr: "legal FLAC depth"},
-		{spec: "24/48000/2", wantErr: `want "bits/rate"`},
-		{spec: "24/", wantErr: `want "bits/rate"`},
-		{spec: "/96", wantErr: `want "bits/rate"`},
-		{spec: "24/hz", wantErr: "invalid sample rate"},
-		{spec: "ab/96", wantErr: "invalid bit depth"},
-		{spec: "16/2000000", wantErr: "out of range"},
-		{spec: "16/0", wantErr: "out of range"},
+		{bits: 0, want: 0},
+		{bits: 16, want: 16},
+		{bits: 24, want: 24},
+		{bits: 8, wantErr: "not supported"},
+		{bits: 20, wantErr: "not supported"},
+		{bits: 32, wantErr: "not supported"},
+		{bits: -1, wantErr: "not supported"},
 	}
 	for _, tt := range tests {
-		got, err := ParseQuality(tt.spec)
+		got, err := ParseBits(tt.bits)
 		if tt.wantErr != "" {
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Errorf("ParseQuality(%q): error = %v, want error containing %q", tt.spec, err, tt.wantErr)
+				t.Errorf("ParseBits(%d): error = %v, want error containing %q", tt.bits, err, tt.wantErr)
 			}
 			continue
 		}
 		if err != nil {
-			t.Errorf("ParseQuality(%q): unexpected error %v", tt.spec, err)
+			t.Errorf("ParseBits(%d): unexpected error %v", tt.bits, err)
 			continue
 		}
 		if got != tt.want {
-			t.Errorf("ParseQuality(%q) = %+v, want %+v", tt.spec, got, tt.want)
+			t.Errorf("ParseBits(%d) = %d, want %d", tt.bits, got, tt.want)
+		}
+	}
+}
+
+func TestParseRate(t *testing.T) {
+	tests := []struct {
+		spec    string
+		want    int
+		wantErr string
+	}{
+		{spec: "", want: 0},
+		{spec: "0", want: 0},
+		{spec: "44.1", want: 44100},
+		{spec: "48", want: 48000},
+		{spec: "88.2", want: 88200},
+		{spec: "96", want: 96000},
+		{spec: "176.4", want: 176400},
+		{spec: "192", want: 192000},
+		{spec: "96000", want: 96000},
+		{spec: " 44.1 ", want: 44100},
+		{spec: "abc", wantErr: "invalid sample rate"},
+		{spec: "2000000", wantErr: "out of range"},
+		{spec: "-44100", wantErr: "out of range"},
+	}
+	for _, tt := range tests {
+		got, err := ParseRate(tt.spec)
+		if tt.wantErr != "" {
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("ParseRate(%q): error = %v, want error containing %q", tt.spec, err, tt.wantErr)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("ParseRate(%q): unexpected error %v", tt.spec, err)
+			continue
+		}
+		if got != tt.want {
+			t.Errorf("ParseRate(%q) = %d, want %d", tt.spec, got, tt.want)
 		}
 	}
 }
@@ -72,10 +100,10 @@ func TestQualityPlan(t *testing.T) {
 		{"24/96 from 24/96 untouched", Quality{Bits: 24, SampleRate: 96000}, 96000, 24, 0, 0},
 		{"24/96 from 16/44.1 untouched", Quality{Bits: 24, SampleRate: 96000}, 44100, 16, 0, 0},
 		{"16/44.1 from 24/192 lowers both", Quality{Bits: 16, SampleRate: 44100}, 192000, 24, 44100, 16},
-		{"cap 20 bits from 24", Quality{Bits: 20}, 96000, 24, 0, 20},
-		{"illegal cap rounds down", Quality{Bits: 22}, 96000, 24, 0, 20},
 		{"rate-only cap from higher rate", Quality{SampleRate: 48000}, 96000, 16, 48000, 0},
-		{"unknown source applies cap blindly (bits)", Quality{Bits: 16, SampleRate: 48000}, 0, 0, 48000, 16},
+		{"unknown source does NOT upsample blindly", Quality{Bits: 16, SampleRate: 48000}, 0, 0, 0, 0},
+		{"unknown sample rate does NOT upsample", Quality{Bits: 16, SampleRate: 48000}, 0, 24, 0, 16},
+		{"unknown bits does NOT upsample", Quality{Bits: 16, SampleRate: 48000}, 96000, 0, 48000, 0},
 		{"rate below cap left alone", Quality{Bits: 16, SampleRate: 48000}, 44100, 24, 0, 16},
 	}
 	for _, tt := range tests {

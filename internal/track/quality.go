@@ -34,93 +34,45 @@ func (q Quality) String() string {
 	return bits + "/" + rate
 }
 
-// flacBitDepths are the bit depths FLAC can encode.
-var flacBitDepths = [...]int{8, 12, 16, 20, 24}
+// ParseBits validates a max-bits cap (only 16 or 24 allowed, 0 = unlimited).
+func ParseBits(b int) (int, error) {
+	if b == 0 || b == 16 || b == 24 {
+		return b, nil
+	}
+	return 0, fmt.Errorf("bit depth %d is not supported (FFmpeg FLAC encoder only supports 16 and 24)", b)
+}
 
-// ParseQuality parses a quality-cap spec for command-line flags.
-// Accepted forms:
-//
-//	"24/96"     bits and max sample rate in kHz
-//	"24/96000"  bits and max sample rate in Hz
-//	"16/44.1"   kHz notation with a fractional rate
-//	"96"        sample-rate cap only (kHz or Hz by magnitude)
-//	""          no cap
-//
-// Bits must be a legal FLAC depth (8, 12, 16, 20, 24). Rates below 1000 are
-// interpreted as kHz.
-func ParseQuality(spec string) (Quality, error) {
+// ParseRate parses a sample-rate cap string (e.g. "44.1", "48", "88.2", "96", "176.4", "192", or in Hz like "44100", "96000").
+// Empty string or "0" means unlimited (returns 0, nil).
+func ParseRate(spec string) (int, error) {
 	spec = strings.TrimSpace(spec)
-	if spec == "" {
-		return Quality{}, nil
+	if spec == "" || spec == "0" {
+		return 0, nil
 	}
-
-	var bitsSpec, rateSpec string
-	if n := strings.Count(spec, "/"); n == 1 {
-		parts := strings.SplitN(spec, "/", 2)
-		bitsSpec = strings.TrimSpace(parts[0])
-		rateSpec = strings.TrimSpace(parts[1])
-		if bitsSpec == "" || rateSpec == "" {
-			return Quality{}, fmt.Errorf("want \"bits/rate\" like \"24/96\", got %q", spec)
-		}
-	} else if n > 1 {
-		return Quality{}, fmt.Errorf("want \"bits/rate\" like \"24/96\", got %q", spec)
-	} else {
-		rateSpec = spec
-	}
-
-	var q Quality
-	if bitsSpec != "" {
-		bits, err := strconv.Atoi(bitsSpec)
-		if err != nil {
-			return Quality{}, fmt.Errorf("invalid bit depth in %q: %w", spec, err)
-		}
-		if !isFlacDepth(bits) {
-			return Quality{}, fmt.Errorf("bit depth %d is not a legal FLAC depth (want one of 8, 12, 16, 20, 24)", bits)
-		}
-		q.Bits = bits
-	}
-
-	rate, err := strconv.ParseFloat(rateSpec, 64)
+	rate, err := strconv.ParseFloat(spec, 64)
 	if err != nil {
-		return Quality{}, fmt.Errorf("invalid sample rate in %q: %w", spec, err)
+		return 0, fmt.Errorf("invalid sample rate %q: %w", spec, err)
 	}
-	if rate > 0 && rate < 1000 { // kHz notation
+	if rate > 0 && rate < 1000 { // kHz notation like 44.1, 48, 96, 192
 		rate *= 1000
 	}
 	rateHz := int(math.Round(rate))
-	if rateHz < 1000 || rateHz > 1_048_575 { // FLAC 20-bit sample-rate field
-		return Quality{}, fmt.Errorf("sample rate %s is out of range (1 kHz .. 1048575 Hz)", rateSpec)
+	if rateHz < 1000 || rateHz > 1_048_575 { // FLAC 20-bit sample-rate field limit
+		return 0, fmt.Errorf("sample rate %s is out of range (1 kHz .. 1048575 Hz)", spec)
 	}
-	q.SampleRate = rateHz
-	return q, nil
-}
-
-func isFlacDepth(b int) bool {
-	for _, d := range flacBitDepths {
-		if b == d {
-			return true
-		}
-	}
-	return false
+	return rateHz, nil
 }
 
 // Plan computes per-track ffmpeg targets for a source of the given format.
-// Returned zeros mean "keep the source value". When the source format is
-// unknown (zero srcRate/srcBits), the cap is applied blindly so the output
-// still respects the configured limit.
+// Returned zeros mean "keep the source value". A cap is strictly an upper bound:
+// if the source format is unknown (zero srcRate/srcBits), the source is left untouched
+// to prevent accidental upsampling.
 func (q Quality) Plan(srcRate, srcBits int) (targetRate, targetBits int) {
-	if q.SampleRate > 0 && (srcRate == 0 || srcRate > q.SampleRate) {
+	if q.SampleRate > 0 && srcRate > 0 && srcRate > q.SampleRate {
 		targetRate = q.SampleRate
 	}
-	if q.Bits > 0 {
-		// Round the cap down to a legal FLAC depth (e.g. cap 22 encodes as 20).
-		depth := q.Bits
-		for !isFlacDepth(depth) {
-			depth--
-		}
-		if srcBits == 0 || srcBits > depth {
-			targetBits = depth
-		}
+	if q.Bits > 0 && srcBits > 0 && srcBits > q.Bits {
+		targetBits = q.Bits
 	}
 	return targetRate, targetBits
 }

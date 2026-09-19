@@ -25,13 +25,15 @@ func main() {
 		allowOther bool
 		cacheTTL   time.Duration
 
-		maxQualitySpec string
+		maxBits int
+		maxRate string
 	)
 	flag.BoolVar(&debug, "debug", false, "Enable FUSE and VFS debug logging")
 	flag.BoolVar(&keepAlbum, "keep-album", false, "Keep monolithic audio file visible alongside virtual tracks")
 	flag.BoolVar(&allowOther, "allow-other", false, "Allow other users to access the mount (requires user_allow_other in /etc/fuse.conf)")
 	flag.DurationVar(&cacheTTL, "cache-ttl", 5*time.Minute, "Cache time-to-live for sliced tracks after last close (e.g. 5m, 30s)")
-	flag.StringVar(&maxQualitySpec, "max-quality", "", "Cap output quality of sliced tracks, e.g. \"24/96\" (bits/rate); tracks at or below the cap keep their original format (default: unlimited)")
+	flag.IntVar(&maxBits, "max-bits", 0, "Cap bit depth of sliced tracks (16 or 24; default: 0 = keep source)")
+	flag.StringVar(&maxRate, "max-rate", "", "Cap sample rate of sliced tracks in kHz (e.g. 44.1, 48, 96, 192) or Hz (default: unlimited)")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [options] <source_dir> <mount_point>\n\nOptions:\n", filepath.Base(os.Args[0]))
 		flag.PrintDefaults()
@@ -49,11 +51,18 @@ func main() {
 		os.Exit(2)
 	}
 
-	maxQuality, err := track.ParseQuality(maxQualitySpec)
+	bits, err := track.ParseBits(maxBits)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: -max-quality: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error: -max-bits: %v\n", err)
 		os.Exit(2)
 	}
+
+	rate, err := track.ParseRate(maxRate)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: -max-rate: %v\n", err)
+		os.Exit(2)
+	}
+	maxQuality := track.Quality{Bits: bits, SampleRate: rate}
 
 	sourceDir := args[0]
 	mountPoint := args[1]
@@ -65,7 +74,7 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
 	slog.SetDefault(logger)
 	if !maxQuality.Unset() {
-		logger.Info("output quality cap enabled", "max_quality", maxQuality.String(), "note", "tracks at or below the cap keep their original format")
+		logger.Info("output quality cap enabled", "max_bits", maxQuality.Bits, "max_rate_hz", maxQuality.SampleRate, "note", "tracks at or below the cap keep their original format")
 	}
 
 	absSource, err := filepath.Abs(sourceDir)

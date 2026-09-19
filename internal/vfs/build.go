@@ -100,7 +100,7 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger, maxQu
 		if !maxQuality.Unset() {
 			srcFmt, fmtErr := audio.ProbeFormat(audioPath)
 			if fmtErr != nil {
-				logger.Debug("vfs: failed to probe audio format, applying quality cap blindly", "audio", audioPath, "error", fmtErr)
+				logger.Debug("vfs: failed to probe audio format, leaving track quality as source", "audio", audioPath, "error", fmtErr)
 			}
 			targetRate, targetBits = maxQuality.Plan(srcFmt.SampleRate, srcFmt.Bits)
 			if targetRate == 0 && targetBits == 0 {

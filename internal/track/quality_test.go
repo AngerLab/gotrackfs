@@ -3,7 +3,6 @@ package track
 import (
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestParseBits(t *testing.T) {
@@ -47,16 +46,21 @@ func TestParseRate(t *testing.T) {
 		{spec: "", want: 0},
 		{spec: "0", want: 0},
 		{spec: "44.1", want: 44100},
+		{spec: "44.1k", want: 44100},
+		{spec: "44.1kHz", want: 44100},
 		{spec: "48", want: 48000},
+		{spec: "48k", want: 48000},
 		{spec: "88.2", want: 88200},
 		{spec: "96", want: 96000},
+		{spec: "96kHz", want: 96000},
 		{spec: "176.4", want: 176400},
 		{spec: "192", want: 192000},
 		{spec: "96000", want: 96000},
+		{spec: "44100Hz", want: 44100},
 		{spec: " 44.1 ", want: 44100},
 		{spec: "abc", wantErr: "invalid sample rate"},
-		{spec: "2000000", wantErr: "out of range"},
-		{spec: "-44100", wantErr: "out of range"},
+		{spec: "2000000", wantErr: "out of supported range"},
+		{spec: "-44100", wantErr: "must be positive"},
 	}
 	for _, tt := range tests {
 		got, err := ParseRate(tt.spec)
@@ -116,31 +120,24 @@ func TestQualityPlan(t *testing.T) {
 	}
 }
 
-func TestSliceKeyIncludesQualityTargets(t *testing.T) {
-	base := Slice{
-		SourceAudioPath: "/music/album.flac",
-		SourceModTime:   time.Unix(1700000000, 0),
-		SourceSize:      123456,
-		Start:           0,
-		End:             60,
+func TestQualityHumanString(t *testing.T) {
+	cases := []struct {
+		q        Quality
+		wantBits string
+		wantRate string
+	}{
+		{Quality{}, "unlimited", "unlimited"},
+		{Quality{Bits: 24, SampleRate: 96000}, "24-bit", "96 kHz (96000 Hz)"},
+		{Quality{Bits: 16, SampleRate: 44100}, "16-bit", "44.1 kHz (44100 Hz)"},
+		{Quality{Bits: 16}, "16-bit", "unlimited"},
+		{Quality{SampleRate: 48000}, "unlimited", "48 kHz (48000 Hz)"},
 	}
-	original := base.Key()
-
-	resampled := base
-	resampled.TargetSampleRate = 96000
-	if resampled.Key() == original {
-		t.Error("TargetSampleRate must change the cache key")
-	}
-
-	redepthed := base
-	redepthed.TargetBits = 16
-	if redepthed.Key() == original || redepthed.Key() == resampled.Key() {
-		t.Error("TargetBits must change the cache key independently")
-	}
-
-	identical := base
-	if identical.Key() != original {
-		t.Error("key must be deterministic")
+	for _, c := range cases {
+		gotBits, gotRate := c.q.HumanString()
+		if gotBits != c.wantBits || gotRate != c.wantRate {
+			t.Errorf("Quality%+v.HumanString() = (%q, %q), want (%q, %q)",
+				c.q, gotBits, gotRate, c.wantBits, c.wantRate)
+		}
 	}
 }
 

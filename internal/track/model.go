@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"maps"
 	"slices"
 	"time"
 )
@@ -45,7 +46,7 @@ func (s Slice) Tag(key string) string {
 // The key is a 16-character hex prefix of SHA-256.
 func (s Slice) Key() string {
 	hasher := sha256.New()
-	buf := fmt.Appendf(nil, "%s:%d:%d:%.4f:%.4f:%s:t%d:b%d",
+	fmt.Fprintf(hasher, "%s:%d:%d:%.4f:%.4f:%s:t%d:b%d",
 		s.SourceAudioPath,
 		s.SourceModTime.UnixNano(),
 		s.SourceSize,
@@ -56,17 +57,11 @@ func (s Slice) Key() string {
 		s.TargetBits,
 	)
 	if len(s.Tags) > 0 {
-		keys := make([]string, 0, len(s.Tags))
-		for k := range s.Tags {
-			keys = append(keys, k)
-		}
-		slices.Sort(keys)
-		for _, k := range keys {
+		for _, k := range slices.Sorted(maps.Keys(s.Tags)) {
 			if v := s.Tags[k]; v != "" {
-				buf = fmt.Appendf(buf, ":%s=%s", k, v)
+				fmt.Fprintf(hasher, ":%s=%s", k, v)
 			}
 		}
 	}
-	hasher.Write(buf)
 	return hex.EncodeToString(hasher.Sum(nil))[:16]
 }

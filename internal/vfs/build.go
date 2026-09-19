@@ -106,20 +106,12 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger, maxQu
 			}
 		}
 
-		qualityRatio := float64(1)
-		if srcFmt.SampleRate > 0 && srcFmt.Bits > 0 {
-			effectiveRate := srcFmt.SampleRate
-			if targetRate > 0 {
-				effectiveRate = targetRate
-			}
-			effectiveBits := srcFmt.Bits
-			if targetBits > 0 {
-				effectiveBits = targetBits
-			}
-			qualityRatio = (float64(effectiveRate) / float64(srcFmt.SampleRate)) * (float64(effectiveBits) / float64(srcFmt.Bits))
-			if qualityRatio > 1 {
-				qualityRatio = 1
-			}
+		qualityRatio := 1.0
+		if srcFmt.SampleRate > 0 && targetRate > 0 {
+			qualityRatio *= float64(targetRate) / float64(srcFmt.SampleRate)
+		}
+		if srcFmt.Bits > 0 && targetBits > 0 {
+			qualityRatio *= float64(targetBits) / float64(srcFmt.Bits)
 		}
 		if ext := strings.ToLower(filepath.Ext(audioPath)); ext == ".wav" || ext == ".wave" {
 			// WAV is uncompressed PCM; FLAC encodes it to ~60% of raw PCM size.

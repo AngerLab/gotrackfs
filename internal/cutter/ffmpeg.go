@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"slices"
@@ -121,12 +122,7 @@ func (c *FFmpegCutter) BuildArgs(req track.Slice, outputPath string) []string {
 
 	// Metadata tags (sorted deterministically)
 	if len(req.Tags) > 0 {
-		keys := make([]string, 0, len(req.Tags))
-		for k := range req.Tags {
-			keys = append(keys, k)
-		}
-		slices.Sort(keys)
-		for _, k := range keys {
+		for _, k := range slices.Sorted(maps.Keys(req.Tags)) {
 			if v := req.Tags[k]; v != "" {
 				args = append(args, "-metadata", fmt.Sprintf("%s=%s", k, v))
 			}
@@ -135,6 +131,13 @@ func (c *FFmpegCutter) BuildArgs(req track.Slice, outputPath string) []string {
 
 	args = append(args, outputPath)
 	return args
+}
+
+// execCut runs ffmpeg with args constructed from req and returns the combined output.
+func (c *FFmpegCutter) execCut(ctx context.Context, req track.Slice, outputPath string) ([]byte, error) {
+	args := c.BuildArgs(req, outputPath)
+	cmd := exec.CommandContext(ctx, c.binPath, args...)
+	return cmd.CombinedOutput()
 }
 
 // Cut executes ffmpeg to generate the sliced track.
@@ -156,48 +159,45 @@ func (c *FFmpegCutter) Cut(ctx context.Context, req track.Slice, outputPath stri
 		}
 	}
 
-	args := c.BuildArgs(req, outputPath)
 	c.logger.Debug("ffmpeg: starting track cut", "source", req.SourceAudioPath, "start", req.Start, "end", req.End, "output", outputPath)
 
-	cmd := exec.CommandContext(ctx, c.binPath, args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
+	output, err := c.execCut(ctx, req, outputPath)
+	if err == nil {
+		return nil
+	}
+	if ctx.Err() != nil {
+		_ = os.Remove(outputPath)
+		return ctx.Err()
+	}
+
+	if req.ArtworkPath != "" {
+		c.logger.Warn("ffmpeg: cut with artwork failed, retrying without artwork",
+			"source", req.SourceAudioPath,
+			"artwork", req.ArtworkPath,
+			"error", err,
+			"stderr", string(output),
+		)
+		_ = os.Remove(outputPath)
+
+		fallbackReq := req
+		fallbackReq.ArtworkPath = ""
+		fallbackOutput, fallbackErr := c.execCut(ctx, fallbackReq, outputPath)
+		if fallbackErr == nil {
+			return nil
+		}
 		if ctx.Err() != nil {
 			_ = os.Remove(outputPath)
 			return ctx.Err()
 		}
-		if req.ArtworkPath != "" {
-			c.logger.Warn("ffmpeg: cut with artwork failed, retrying without artwork",
-				"source", req.SourceAudioPath,
-				"artwork", req.ArtworkPath,
-				"error", err,
-				"stderr", string(output),
-			)
-			_ = os.Remove(outputPath)
 
-			fallbackReq := req
-			fallbackReq.ArtworkPath = ""
-			fallbackArgs := c.BuildArgs(fallbackReq, outputPath)
-			fallbackCmd := exec.CommandContext(ctx, c.binPath, fallbackArgs...)
-			fallbackOutput, fallbackErr := fallbackCmd.CombinedOutput()
-			if fallbackErr == nil {
-				return nil
-			}
-			if ctx.Err() != nil {
-				_ = os.Remove(outputPath)
-				return ctx.Err()
-			}
-
-			c.logger.Error("ffmpeg cut failed (both with and without artwork)",
-				"source", req.SourceAudioPath,
-				"error", fallbackErr,
-				"stderr", string(fallbackOutput),
-			)
-			return fmt.Errorf("ffmpeg cut failed: %w (output: %s)", fallbackErr, string(fallbackOutput))
-		}
-
-		c.logger.Error("ffmpeg cut failed", "error", err, "stderr", string(output), "source", req.SourceAudioPath)
-		return fmt.Errorf("ffmpeg cut failed: %w (output: %s)", err, string(output))
+		c.logger.Error("ffmpeg cut failed (both with and without artwork)",
+			"source", req.SourceAudioPath,
+			"error", fallbackErr,
+			"stderr", string(fallbackOutput),
+		)
+		return fmt.Errorf("ffmpeg cut failed (with artwork: %v; without artwork: %w; output: %s)", err, fallbackErr, string(fallbackOutput))
 	}
-	return nil
+
+	c.logger.Error("ffmpeg cut failed", "error", err, "stderr", string(output), "source", req.SourceAudioPath)
+	return fmt.Errorf("ffmpeg cut failed: %w (output: %s)", err, string(output))
 }

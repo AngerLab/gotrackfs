@@ -34,6 +34,23 @@ func (q Quality) String() string {
 	return bits + "/" + rate
 }
 
+// HumanString returns formatted human-readable descriptions of the bit depth and sample rate caps (e.g. "24-bit" and "96 kHz (96000 Hz)").
+func (q Quality) HumanString() (bitsStr, rateStr string) {
+	bitsStr = "unlimited"
+	if q.Bits > 0 {
+		bitsStr = fmt.Sprintf("%d-bit", q.Bits)
+	}
+	rateStr = "unlimited"
+	if q.SampleRate > 0 {
+		if q.SampleRate%1000 == 0 {
+			rateStr = fmt.Sprintf("%d kHz (%d Hz)", q.SampleRate/1000, q.SampleRate)
+		} else {
+			rateStr = fmt.Sprintf("%.1f kHz (%d Hz)", float64(q.SampleRate)/1000, q.SampleRate)
+		}
+	}
+	return bitsStr, rateStr
+}
+
 // ParseBits validates a max-bits cap (only 16 or 24 allowed, 0 = unlimited).
 func ParseBits(b int) (int, error) {
 	if b == 0 || b == 16 || b == 24 {
@@ -42,23 +59,40 @@ func ParseBits(b int) (int, error) {
 	return 0, fmt.Errorf("bit depth %d is not supported (FFmpeg FLAC encoder only supports 16 and 24)", b)
 }
 
-// ParseRate parses a sample-rate cap string (e.g. "44.1", "48", "88.2", "96", "176.4", "192", or in Hz like "44100", "96000").
+// ParseRate parses a sample-rate cap string (e.g. "44.1", "48", "96", "44.1k", "96kHz", "44100", "96000").
 // Empty string or "0" means unlimited (returns 0, nil).
 func ParseRate(spec string) (int, error) {
-	spec = strings.TrimSpace(spec)
-	if spec == "" || spec == "0" {
+	raw := strings.TrimSpace(spec)
+	if raw == "" || raw == "0" {
 		return 0, nil
 	}
-	rate, err := strconv.ParseFloat(spec, 64)
+	s := strings.ToLower(raw)
+	multiplier := 1.0
+	switch {
+	case strings.HasSuffix(s, "khz"):
+		multiplier = 1000
+		s = strings.TrimSuffix(s, "khz")
+	case strings.HasSuffix(s, "k"):
+		multiplier = 1000
+		s = strings.TrimSuffix(s, "k")
+	case strings.HasSuffix(s, "hz"):
+		s = strings.TrimSuffix(s, "hz")
+	}
+	s = strings.TrimSpace(s)
+	rate, err := strconv.ParseFloat(s, 64)
 	if err != nil {
-		return 0, fmt.Errorf("invalid sample rate %q: %w", spec, err)
+		return 0, fmt.Errorf("invalid sample rate %q: %w", raw, err)
 	}
-	if rate > 0 && rate < 1000 { // kHz notation like 44.1, 48, 96, 192
-		rate *= 1000
+	if rate <= 0 {
+		return 0, fmt.Errorf("sample rate %q must be positive", raw)
 	}
-	rateHz := int(math.Round(rate))
-	if rateHz < 1000 || rateHz > 1_048_575 { // FLAC 20-bit sample-rate field limit
-		return 0, fmt.Errorf("sample rate %s is out of range (1 kHz .. 1048575 Hz)", spec)
+	// If no explicit unit suffix was provided and value is in kHz range (< 1000 with decimal or standard kHz value), treat as kHz.
+	if multiplier == 1.0 && (strings.Contains(s, ".") || rate <= 384) {
+		multiplier = 1000
+	}
+	rateHz := int(math.Round(rate * multiplier))
+	if rateHz < 8000 || rateHz > 1_048_575 { // FLAC 20-bit sample-rate field limit
+		return 0, fmt.Errorf("sample rate %q is out of supported range (8 kHz .. 1048575 Hz)", raw)
 	}
 	return rateHz, nil
 }

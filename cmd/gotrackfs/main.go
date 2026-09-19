@@ -140,18 +140,7 @@ func main() {
 		host.Unmount()
 	}()
 
-	maxBitsStr := "unlimited"
-	if maxQuality.Bits > 0 {
-		maxBitsStr = fmt.Sprintf("%d-bit", maxQuality.Bits)
-	}
-	maxRateStr := "unlimited"
-	if maxQuality.SampleRate > 0 {
-		if maxQuality.SampleRate%1000 == 0 {
-			maxRateStr = fmt.Sprintf("%d kHz (%d Hz)", maxQuality.SampleRate/1000, maxQuality.SampleRate)
-		} else {
-			maxRateStr = fmt.Sprintf("%.1f kHz (%d Hz)", float64(maxQuality.SampleRate)/1000, maxQuality.SampleRate)
-		}
-	}
+	maxBitsStr, maxRateStr := maxQuality.HumanString()
 
 	fmt.Printf("Mounting gotrackfs:\n"+
 		"  Source:      %s\n"+

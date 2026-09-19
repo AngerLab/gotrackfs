@@ -29,74 +29,81 @@ type Info struct {
 	Format   Format
 }
 
+type flacStreamInfo struct {
+	Format       Format
+	TotalSamples uint64
+}
+
+type wavHeaderInfo struct {
+	Format   Format
+	ByteRate uint32
+	DataSize uint32
+	HasFmt   bool
+}
+
 // Probe reads container headers (FLAC STREAMINFO or WAV fmt/data chunks) once,
 // returning both duration and format properties in a single pass without external tools.
 func Probe(filePath string) (Info, error) {
 	ext := strings.ToLower(filepath.Ext(filePath))
 	switch ext {
 	case ".flac":
-		sampleRate, bits, channels, totalSamples, err := probeFLACInfo(filePath)
+		flacInfo, err := probeFLACInfo(filePath)
 		if err != nil {
 			return Info{}, err
 		}
-		if sampleRate == 0 {
+		if flacInfo.Format.SampleRate == 0 {
 			return Info{}, errors.New("flac: zero sample rate in STREAMINFO")
 		}
 		var dur float64
-		if totalSamples > 0 {
-			dur = float64(totalSamples) / float64(sampleRate)
+		if flacInfo.TotalSamples > 0 {
+			dur = float64(flacInfo.TotalSamples) / float64(flacInfo.Format.SampleRate)
 		}
 		return Info{
 			Duration: dur,
-			Format: Format{
-				SampleRate: sampleRate,
-				Bits:       bits,
-				Channels:   channels,
-			},
+			Format:   flacInfo.Format,
 		}, nil
 	case ".wav", ".wave":
-		format, hasFmt, byteRate, dataSize, err := probeWAVInfo(filePath)
+		wavInfo, err := probeWAVInfo(filePath)
 		if err != nil {
 			return Info{}, err
 		}
-		if !hasFmt || format.SampleRate == 0 {
+		if !wavInfo.HasFmt || wavInfo.Format.SampleRate == 0 {
 			return Info{}, errors.New("wav: missing or invalid fmt chunk")
 		}
 		var dur float64
-		if byteRate > 0 && dataSize > 0 {
-			dur = float64(dataSize) / float64(byteRate)
+		if wavInfo.ByteRate > 0 && wavInfo.DataSize > 0 {
+			dur = float64(wavInfo.DataSize) / float64(wavInfo.ByteRate)
 		}
 		return Info{
 			Duration: dur,
-			Format:   format,
+			Format:   wavInfo.Format,
 		}, nil
 	default:
 		return Info{}, ErrNotSupported
 	}
 }
 
-// probeFLACInfo reads the FLAC STREAMINFO metadata block (34 bytes) and returns
-// sample rate (Hz), bits per sample, channel count and total sample count.
-func probeFLACInfo(filePath string) (sampleRate, bits, channels int, totalSamples uint64, err error) {
+// probeFLACInfo reads the FLAC STREAMINFO metadata block (34 bytes) and returns container info.
+func probeFLACInfo(filePath string) (flacStreamInfo, error) {
 	f, err := os.Open(filePath)
 	if err != nil {
-		return 0, 0, 0, 0, err
+		return flacStreamInfo{}, err
 	}
 	defer f.Close()
 
 	var magic [4]byte
 	if _, err := io.ReadFull(f, magic[:]); err != nil {
-		return 0, 0, 0, 0, err
+		return flacStreamInfo{}, err
 	}
 	if string(magic[:]) != "fLaC" {
-		return 0, 0, 0, 0, fmt.Errorf("not a flac file: %q", magic)
+		return flacStreamInfo{}, fmt.Errorf("not a flac file: %q", magic)
 	}
 
 	// Loop metadata blocks until STREAMINFO (block type 0, usually the very first block)
 	for {
 		var header [4]byte
 		if _, err := io.ReadFull(f, header[:]); err != nil {
-			return 0, 0, 0, 0, err
+			return flacStreamInfo{}, err
 		}
 
 		isLast := (header[0] & 0x80) != 0
@@ -105,22 +112,29 @@ func probeFLACInfo(filePath string) (sampleRate, bits, channels int, totalSample
 
 		if blockType == 0 { // STREAMINFO
 			if length < 34 {
-				return 0, 0, 0, 0, errors.New("flac: STREAMINFO block too small")
+				return flacStreamInfo{}, errors.New("flac: STREAMINFO block too small")
 			}
 			var data [34]byte
 			if _, err := io.ReadFull(f, data[:]); err != nil {
-				return 0, 0, 0, 0, err
+				return flacStreamInfo{}, err
 			}
 
 			// Bytes 10-17:
 			// sample_rate (20 bits), channels-1 (3 bits), bps-1 (5 bits), total_samples (36 bits)
 			v := binary.BigEndian.Uint64(data[10:18])
-			sampleRate = int(v >> 44)
-			channels = int(v>>41&0x7) + 1
-			bits = int(v>>36&0x1F) + 1
-			totalSamples = v & 0xFFFFFFFFF
+			sampleRate := int(v >> 44)
+			channels := int(v>>41&0x7) + 1
+			bits := int(v>>36&0x1F) + 1
+			totalSamples := v & 0xFFFFFFFFF
 
-			return sampleRate, bits, channels, totalSamples, nil
+			return flacStreamInfo{
+				Format: Format{
+					SampleRate: sampleRate,
+					Bits:       bits,
+					Channels:   channels,
+				},
+				TotalSamples: totalSamples,
+			}, nil
 		}
 
 		if isLast {
@@ -128,30 +142,31 @@ func probeFLACInfo(filePath string) (sampleRate, bits, channels int, totalSample
 		}
 
 		if _, err := f.Seek(int64(length), io.SeekCurrent); err != nil {
-			return 0, 0, 0, 0, err
+			return flacStreamInfo{}, err
 		}
 	}
 
-	return 0, 0, 0, 0, errors.New("flac: STREAMINFO block not found")
+	return flacStreamInfo{}, errors.New("flac: STREAMINFO block not found")
 }
 
-// probeWAVInfo reads RIFF WAVE header fmt and data chunks, returning the source
-// format, the fmt byte rate and the data chunk size (0s when absent).
-func probeWAVInfo(filePath string) (format Format, hasFmt bool, byteRate, dataSize uint32, err error) {
+// probeWAVInfo reads RIFF WAVE header fmt and data chunks, returning container info.
+func probeWAVInfo(filePath string) (wavHeaderInfo, error) {
 	f, err := os.Open(filePath)
 	if err != nil {
-		return Format{}, false, 0, 0, err
+		return wavHeaderInfo{}, err
 	}
 	defer f.Close()
 
 	var header [12]byte
 	if _, err := io.ReadFull(f, header[:]); err != nil {
-		return Format{}, false, 0, 0, err
+		return wavHeaderInfo{}, err
 	}
 
 	if string(header[0:4]) != "RIFF" || string(header[8:12]) != "WAVE" {
-		return Format{}, false, 0, 0, errors.New("wav: not a valid RIFF WAVE file")
+		return wavHeaderInfo{}, errors.New("wav: not a valid RIFF WAVE file")
 	}
+
+	var info wavHeaderInfo
 
 	for {
 		var chunkHeader [8]byte
@@ -159,7 +174,7 @@ func probeWAVInfo(filePath string) (format Format, hasFmt bool, byteRate, dataSi
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
 				break
 			}
-			return Format{}, hasFmt, byteRate, dataSize, err
+			return info, err
 		}
 
 		chunkID := string(chunkHeader[0:4])
@@ -168,21 +183,21 @@ func probeWAVInfo(filePath string) (format Format, hasFmt bool, byteRate, dataSi
 		if chunkID == "fmt " && chunkSize >= 16 {
 			var fmtData [16]byte
 			if _, err := io.ReadFull(f, fmtData[:]); err != nil {
-				return Format{}, hasFmt, byteRate, dataSize, err
+				return info, err
 			}
-			format.Channels = int(binary.LittleEndian.Uint16(fmtData[2:4]))
-			format.SampleRate = int(binary.LittleEndian.Uint32(fmtData[4:8]))
-			byteRate = binary.LittleEndian.Uint32(fmtData[8:12])
-			format.Bits = int(binary.LittleEndian.Uint16(fmtData[14:16]))
-			hasFmt = true
+			info.Format.Channels = int(binary.LittleEndian.Uint16(fmtData[2:4]))
+			info.Format.SampleRate = int(binary.LittleEndian.Uint32(fmtData[4:8]))
+			info.ByteRate = binary.LittleEndian.Uint32(fmtData[8:12])
+			info.Format.Bits = int(binary.LittleEndian.Uint16(fmtData[14:16]))
+			info.HasFmt = true
 			remaining := int64(chunkSize) - 16
 			if remaining > 0 {
 				if _, err := f.Seek(remaining, io.SeekCurrent); err != nil {
-					return Format{}, hasFmt, byteRate, dataSize, err
+					return info, err
 				}
 			}
 		} else if chunkID == "data" {
-			dataSize = chunkSize
+			info.DataSize = chunkSize
 			break
 		} else {
 			// Skip chunk and 1-byte padding if odd
@@ -196,5 +211,5 @@ func probeWAVInfo(filePath string) (format Format, hasFmt bool, byteRate, dataSi
 		}
 	}
 
-	return format, hasFmt, byteRate, dataSize, nil
+	return info, nil
 }

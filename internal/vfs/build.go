@@ -89,20 +89,17 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger, maxQu
 		}
 		claimedAudios[audioPath] = true
 
-		totalAudioDuration, durErr := audio.ProbeDuration(audioPath)
-		if durErr != nil {
-			logger.Debug("vfs: failed to probe audio duration", "audio", audioPath, "error", durErr)
+		audioInfo, probeErr := audio.Probe(audioPath)
+		if probeErr != nil {
+			logger.Debug("vfs: failed to probe audio file", "audio", audioPath, "error", probeErr)
 		}
+		totalAudioDuration := audioInfo.Duration
 
 		// Quality cap: probe the source format once per album and lower cuts
 		// that exceed it. Unset cap leaves every slice in the source format.
 		var targetRate, targetBits int
-		if !maxQuality.Unset() {
-			srcFmt, fmtErr := audio.ProbeFormat(audioPath)
-			if fmtErr != nil {
-				logger.Debug("vfs: failed to probe audio format, leaving track quality as source", "audio", audioPath, "error", fmtErr)
-			}
-			targetRate, targetBits = maxQuality.Plan(srcFmt.SampleRate, srcFmt.Bits)
+		if !maxQuality.Unset() && probeErr == nil {
+			targetRate, targetBits = maxQuality.Plan(audioInfo.Format.SampleRate, audioInfo.Format.Bits)
 			if targetRate == 0 && targetBits == 0 {
 				logger.Debug("vfs: source already at or below quality cap", "audio", audioPath, "cap", maxQuality.String())
 			}

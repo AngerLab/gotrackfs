@@ -9,26 +9,29 @@ import (
 	"testing"
 )
 
-func TestProbeFLACDuration_RealFile(t *testing.T) {
+func TestProbe_RealFile(t *testing.T) {
 	// Probe real FLAC if available in playground
 	realFlac := filepath.Join("..", "..", ".playground", "SOURCE", "Dartz - Proxima Parada", "Dartz - Proxima Parada.flac")
 	if _, err := os.Stat(realFlac); err != nil {
 		t.Skip("skipping real flac test: file not found")
 	}
 
-	dur, err := ProbeDuration(realFlac)
+	info, err := Probe(realFlac)
 	if err != nil {
-		t.Fatalf("ProbeDuration failed: %v", err)
+		t.Fatalf("Probe failed: %v", err)
 	}
 
 	// 150468612 / 44100 = 3411.986666... seconds
 	expected := 3411.9866
-	if math.Abs(dur-expected) > 0.1 {
-		t.Errorf("expected duration ~%.2f, got %.2f", expected, dur)
+	if math.Abs(info.Duration-expected) > 0.1 {
+		t.Errorf("expected duration ~%.2f, got %.2f", expected, info.Duration)
+	}
+	if info.Format.SampleRate != 44100 || info.Format.Bits != 16 || info.Format.Channels != 2 {
+		t.Errorf("expected 44100/16/2, got %+v", info.Format)
 	}
 }
 
-func TestProbeFLACDuration_Synthetic(t *testing.T) {
+func TestProbe_FLACSynthetic(t *testing.T) {
 	tmpDir := t.TempDir()
 	flacPath := filepath.Join(tmpDir, "test.flac")
 
@@ -41,10 +44,6 @@ func TestProbeFLACDuration_Synthetic(t *testing.T) {
 
 	var streaminfo [34]byte
 	// 44100 Hz, 2 ch, 16 bits, 441000 samples (10 seconds)
-	// sample_rate: 44100 (0xAC44, 20 bits)
-	// ch-1: 1 (3 bits)
-	// bps-1: 15 (5 bits)
-	// total_samples: 441000 (0x6BAE8, 36 bits)
 	v := uint64(44100)<<44 | uint64(1)<<41 | uint64(15)<<36 | uint64(441000)
 	binary.BigEndian.PutUint64(streaminfo[10:18], v)
 
@@ -54,17 +53,20 @@ func TestProbeFLACDuration_Synthetic(t *testing.T) {
 		t.Fatalf("write synthetic flac: %v", err)
 	}
 
-	dur, err := ProbeDuration(flacPath)
+	info, err := Probe(flacPath)
 	if err != nil {
-		t.Fatalf("ProbeDuration failed: %v", err)
+		t.Fatalf("Probe failed: %v", err)
 	}
 
-	if math.Abs(dur-10.0) > 0.001 {
-		t.Errorf("expected duration 10.0, got %f", dur)
+	if math.Abs(info.Duration-10.0) > 0.001 {
+		t.Errorf("expected duration 10.0, got %f", info.Duration)
+	}
+	if info.Format.SampleRate != 44100 || info.Format.Bits != 16 || info.Format.Channels != 2 {
+		t.Errorf("expected 44100/16/2, got %+v", info.Format)
 	}
 }
 
-func TestProbeWAVDuration_Synthetic(t *testing.T) {
+func TestProbe_WAVSynthetic(t *testing.T) {
 	tmpDir := t.TempDir()
 	wavPath := filepath.Join(tmpDir, "test.wav")
 
@@ -93,17 +95,20 @@ func TestProbeWAVDuration_Synthetic(t *testing.T) {
 		t.Fatalf("write synthetic wav: %v", err)
 	}
 
-	dur, err := ProbeDuration(wavPath)
+	info, err := Probe(wavPath)
 	if err != nil {
-		t.Fatalf("ProbeDuration failed: %v", err)
+		t.Fatalf("Probe failed: %v", err)
 	}
 
-	if math.Abs(dur-5.0) > 0.001 {
-		t.Errorf("expected duration 5.0, got %f", dur)
+	if math.Abs(info.Duration-5.0) > 0.001 {
+		t.Errorf("expected duration 5.0, got %f", info.Duration)
+	}
+	if info.Format.SampleRate != 44100 || info.Format.Bits != 16 || info.Format.Channels != 2 {
+		t.Errorf("expected 44100/16/2, got %+v", info.Format)
 	}
 }
 
-func TestProbeFormat_FlacSynthetic(t *testing.T) {
+func TestProbe_FlacSyntheticFormats(t *testing.T) {
 	tests := []struct {
 		name  string
 		rate  uint64
@@ -131,24 +136,73 @@ func TestProbeFormat_FlacSynthetic(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			format, err := ProbeFormat(flacPath)
+			info, err := Probe(flacPath)
 			if err != nil {
-				t.Fatalf("ProbeFormat failed: %v", err)
+				t.Fatalf("Probe failed: %v", err)
 			}
-			if format.SampleRate != int(tt.rate) || format.Bits != int(tt.bps) || format.Channels != int(tt.chans) {
-				t.Errorf("ProbeFormat = %+v, want rate=%d bits=%d ch=%d", format, tt.rate, tt.bps, tt.chans)
+			if info.Format.SampleRate != int(tt.rate) || info.Format.Bits != int(tt.bps) || info.Format.Channels != int(tt.chans) {
+				t.Errorf("Probe = %+v, want rate=%d bits=%d ch=%d", info.Format, tt.rate, tt.bps, tt.chans)
 			}
 		})
 	}
 }
 
-func TestProbeFormat_UnsupportedExt(t *testing.T) {
+func TestProbe_UnsupportedExt(t *testing.T) {
 	tmpDir := t.TempDir()
 	p := filepath.Join(tmpDir, "track.ogg")
 	if err := os.WriteFile(p, []byte("OggS"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ProbeFormat(p); err == nil {
+	if _, err := Probe(p); err == nil {
 		t.Error("expected error for unsupported extension")
+	}
+}
+
+func TestProbe_SinglePassFLAC(t *testing.T) {
+	tmpDir := t.TempDir()
+	flacPath := filepath.Join(tmpDir, "test.flac")
+
+	var buf bytes.Buffer
+	buf.WriteString("fLaC")
+	buf.Write([]byte{0x80, 0x00, 0x00, 34})
+	var streaminfo [34]byte
+	// 96000 Hz, 2 ch, 24 bits, 960000 samples (10 seconds)
+	v := uint64(96000)<<44 | uint64(1)<<41 | uint64(23)<<36 | uint64(960000)
+	binary.BigEndian.PutUint64(streaminfo[10:18], v)
+	buf.Write(streaminfo[:])
+	if err := os.WriteFile(flacPath, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := Probe(flacPath)
+	if err != nil {
+		t.Fatalf("Probe failed: %v", err)
+	}
+	if math.Abs(info.Duration-10.0) > 0.001 {
+		t.Errorf("expected duration 10.0, got %f", info.Duration)
+	}
+	if info.Format.SampleRate != 96000 || info.Format.Bits != 24 || info.Format.Channels != 2 {
+		t.Errorf("expected 96000/24/2, got %+v", info.Format)
+	}
+}
+
+func TestProbe_MalformedWAVMissingFmt(t *testing.T) {
+	tmpDir := t.TempDir()
+	wavPath := filepath.Join(tmpDir, "bad.wav")
+
+	var buf bytes.Buffer
+	buf.WriteString("RIFF")
+	binary.Write(&buf, binary.LittleEndian, uint32(12))
+	buf.WriteString("WAVE")
+	buf.WriteString("JUNK")
+	binary.Write(&buf, binary.LittleEndian, uint32(4))
+	buf.WriteString("1234")
+
+	if err := os.WriteFile(wavPath, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Probe(wavPath); err == nil {
+		t.Error("expected error for WAV missing fmt chunk")
 	}
 }

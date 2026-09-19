@@ -22,53 +22,56 @@ type Format struct {
 	Channels   int // channel count
 }
 
-// ProbeDuration attempts to determine the exact duration in seconds of an audio file
-// by reading header metadata (FLAC STREAMINFO or WAV fmt/data chunks) without external tools.
-func ProbeDuration(filePath string) (float64, error) {
-	ext := strings.ToLower(filepath.Ext(filePath))
-	switch ext {
-	case ".flac":
-		sampleRate, _, _, totalSamples, err := probeFLACInfo(filePath)
-		if err != nil {
-			return 0, err
-		}
-		if sampleRate == 0 || totalSamples == 0 {
-			return 0, errors.New("flac: zero sample rate or total samples in STREAMINFO")
-		}
-		return float64(totalSamples) / float64(sampleRate), nil
-	case ".wav", ".wave":
-		_, _, byteRate, dataSize, err := probeWAVInfo(filePath)
-		if err != nil {
-			return 0, err
-		}
-		if byteRate == 0 || dataSize == 0 {
-			return 0, errors.New("wav: missing fmt or data chunk")
-		}
-		return float64(dataSize) / float64(byteRate), nil
-	default:
-		return 0, ErrNotSupported
-	}
+// Info holds basic source-audio metadata (duration and format) discovered
+// by reading container headers without external tools.
+type Info struct {
+	Duration float64 // seconds (0 if unknown)
+	Format   Format
 }
 
-// ProbeFormat attempts to determine the sample rate, bit depth and channel count
-// of an audio file by reading its header metadata without external tools.
-func ProbeFormat(filePath string) (Format, error) {
+// Probe reads container headers (FLAC STREAMINFO or WAV fmt/data chunks) once,
+// returning both duration and format properties in a single pass without external tools.
+func Probe(filePath string) (Info, error) {
 	ext := strings.ToLower(filepath.Ext(filePath))
 	switch ext {
 	case ".flac":
-		sampleRate, bits, channels, _, err := probeFLACInfo(filePath)
+		sampleRate, bits, channels, totalSamples, err := probeFLACInfo(filePath)
 		if err != nil {
-			return Format{}, err
+			return Info{}, err
 		}
-		return Format{SampleRate: sampleRate, Bits: bits, Channels: channels}, nil
+		if sampleRate == 0 {
+			return Info{}, errors.New("flac: zero sample rate in STREAMINFO")
+		}
+		var dur float64
+		if totalSamples > 0 {
+			dur = float64(totalSamples) / float64(sampleRate)
+		}
+		return Info{
+			Duration: dur,
+			Format: Format{
+				SampleRate: sampleRate,
+				Bits:       bits,
+				Channels:   channels,
+			},
+		}, nil
 	case ".wav", ".wave":
-		format, _, _, _, err := probeWAVInfo(filePath)
+		format, hasFmt, byteRate, dataSize, err := probeWAVInfo(filePath)
 		if err != nil {
-			return Format{}, err
+			return Info{}, err
 		}
-		return format, nil
+		if !hasFmt || format.SampleRate == 0 {
+			return Info{}, errors.New("wav: missing or invalid fmt chunk")
+		}
+		var dur float64
+		if byteRate > 0 && dataSize > 0 {
+			dur = float64(dataSize) / float64(byteRate)
+		}
+		return Info{
+			Duration: dur,
+			Format:   format,
+		}, nil
 	default:
-		return Format{}, ErrNotSupported
+		return Info{}, ErrNotSupported
 	}
 }
 

@@ -617,10 +617,11 @@ func TestFFmpegCutter_RealFFmpeg_QualityDownsample(t *testing.T) {
 	}
 
 	// Verify source audio properties
-	srcFmt, err := audio.ProbeFormat(sourceAudio)
+	srcInfo, err := audio.Probe(sourceAudio)
 	if err != nil {
 		t.Fatalf("failed to probe source audio format: %v", err)
 	}
+	srcFmt := srcInfo.Format
 	if srcFmt.SampleRate != 192000 || srcFmt.Bits != 24 {
 		t.Fatalf("expected source 192000Hz/24bit, got %dHz/%dbit", srcFmt.SampleRate, srcFmt.Bits)
 	}
@@ -675,10 +676,11 @@ func TestFFmpegCutter_RealFFmpeg_QualityDownsample(t *testing.T) {
 				t.Fatalf("cutter.Cut failed: %v", err)
 			}
 
-			outFmt, err := audio.ProbeFormat(outputPath)
+			outInfo, err := audio.Probe(outputPath)
 			if err != nil {
 				t.Fatalf("failed to probe output audio format: %v", err)
 			}
+			outFmt := outInfo.Format
 
 			if outFmt.SampleRate != tt.expectedSampleRate {
 				t.Errorf("expected sample rate %d, got %d", tt.expectedSampleRate, outFmt.SampleRate)

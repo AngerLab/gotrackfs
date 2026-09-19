@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AngerLab/gotrackfs/internal/audio"
 	"github.com/AngerLab/gotrackfs/internal/track"
 )
 
@@ -33,8 +34,8 @@ func (m *mockCutter) Cut(ctx context.Context, req track.Slice, outputPath string
 	return os.WriteFile(outputPath, []byte("SLICED_AUDIO_DATA"), 0644)
 }
 
-func TestFFmpegCutter_BuildArgs(t *testing.T) {
-	cutter := &FFmpegCutter{binPath: "ffmpeg"}
+func TestFFmpeg_BuildArgs(t *testing.T) {
+	cutter := &FFmpeg{binPath: "ffmpeg"}
 
 	req := track.Slice{
 		SourceAudioPath: "/music/album.flac",
@@ -72,6 +73,8 @@ func TestFFmpegCutter_BuildArgs(t *testing.T) {
 	assertArgContains("attached_pic")
 	assertArgContains("-c:a")
 	assertArgContains("flac")
+	assertArgContains("-frame_size")
+	assertArgContains("4096")
 	assertArgContains("-compression_level")
 	assertArgContains("1")
 	assertArgContains("-metadata")
@@ -280,7 +283,7 @@ func TestTrackSlice_KeyDerivesFromSourceFacts(t *testing.T) {
 	}
 }
 
-func TestFFmpegCutter_GracefulDegradationOnCorruptArtwork(t *testing.T) {
+func TestFFmpeg_GracefulDegradationOnCorruptArtwork(t *testing.T) {
 	ffmpegPath, err := exec.LookPath("ffmpeg")
 	if err != nil {
 		t.Skip("ffmpeg not installed, skipping test")
@@ -302,7 +305,7 @@ func TestFFmpegCutter_GracefulDegradationOnCorruptArtwork(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cutter, err := NewFFmpegCutter(ffmpegPath, nil)
+	cutter, err := NewFFmpeg(ffmpegPath, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,8 +333,8 @@ func TestFFmpegCutter_GracefulDegradationOnCorruptArtwork(t *testing.T) {
 	}
 }
 
-func TestFFmpegCutter_ConcurrencyAndTimeout(t *testing.T) {
-	cutter, err := NewFFmpegCutter("", nil)
+func TestFFmpeg_ConcurrencyAndTimeout(t *testing.T) {
+	cutter, err := NewFFmpeg("", nil)
 	if err != nil {
 		t.Skipf("ffmpeg not installed: %v", err)
 	}
@@ -513,5 +516,208 @@ func TestTrackCacheManager_CutSucceedsWhenNoWaitersScheduledTTL(t *testing.T) {
 	// File MUST be deleted by TTL timer!
 	if _, statErr := os.Stat(expectedPath); !os.IsNotExist(statErr) {
 		t.Fatalf("file leaked in cache: still exists after TTL expiration: %s", expectedPath)
+	}
+}
+
+func TestFFmpeg_BuildArgs_QualityTargets(t *testing.T) {
+	cutter := &FFmpeg{binPath: "ffmpeg"}
+	base := track.Slice{SourceAudioPath: "/music/album.flac", Start: 0, End: 60}
+
+	hasPair := func(args []string, flag, val string) bool {
+		for i, a := range args {
+			if a == flag && i+1 < len(args) && args[i+1] == val {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Default: no targets -> no conversion flags at all.
+	args := cutter.BuildArgs(base, "/tmp/out.flac")
+	for _, forbidden := range []string{"-ar", "-sample_fmt", "-bits_per_raw_sample", "-af"} {
+		if slices.Contains(args, forbidden) {
+			t.Errorf("unconstrained cut must not contain %q, got: %v", forbidden, args)
+		}
+	}
+
+	const kaiserFilter = "aresample=resampler=swr:filter_size=64:phase_shift=12:cutoff=0.949"
+	const ditherFilter = "aresample=resampler=swr:dither_method=f_weighted"
+
+	// Rate-only target (24/192 -> 24/96): precise 64-tap swr Kaiser resampler, no dither.
+	req := base
+	req.TargetSampleRate = 96000
+	args = cutter.BuildArgs(req, "/tmp/out.flac")
+	if !hasPair(args, "-ar", "96000") {
+		t.Errorf("expected -ar 96000, got: %v", args)
+	}
+	if !hasPair(args, "-af", kaiserFilter) {
+		t.Errorf("expected swr Kaiser resampler filter, got: %v", args)
+	}
+	if slices.Contains(args, "-bits_per_raw_sample") {
+		t.Errorf("bit depth must stay untouched, got: %v", args)
+	}
+
+	// Bits-only target to 24 from unknown-precision source: lossless mask, no filter.
+	req = base
+	req.TargetBits = 24
+	args = cutter.BuildArgs(req, "/tmp/out.flac")
+	if !hasPair(args, "-sample_fmt", "s32") || !hasPair(args, "-bits_per_raw_sample", "24") {
+		t.Errorf("expected s32 + bits_per_raw_sample 24, got: %v", args)
+	}
+	if slices.Contains(args, "-ar") || slices.Contains(args, "-af") {
+		t.Errorf("sample rate and filter must stay untouched, got: %v", args)
+	}
+
+	// 16-bit target uses s16 container with noise-shaped dither; swr covers
+	// the rate conversion in the same stage (no separate Kaiser filter).
+	req = base
+	req.TargetSampleRate = 44100
+	req.TargetBits = 16
+	args = cutter.BuildArgs(req, "/tmp/out.flac")
+	if !hasPair(args, "-ar", "44100") || !hasPair(args, "-sample_fmt", "s16") || !hasPair(args, "-bits_per_raw_sample", "16") {
+		t.Errorf("expected 44100 + s16 + bpr16, got: %v", args)
+	}
+	if !hasPair(args, "-af", ditherFilter) {
+		t.Errorf("expected dithered swr filter, got: %v", args)
+	}
+	if slices.Contains(args, kaiserFilter) {
+		t.Errorf("16-bit cap must use exactly one resample filter, got: %v", args)
+	}
+
+	// 20-bit target uses s32 container and stays undithered.
+	req = base
+	req.TargetBits = 20
+	args = cutter.BuildArgs(req, "/tmp/out.flac")
+	if !hasPair(args, "-sample_fmt", "s32") || !hasPair(args, "-bits_per_raw_sample", "20") {
+		t.Errorf("expected s32 + bpr20, got: %v", args)
+	}
+	if slices.Contains(args, "-af") {
+		t.Errorf("20-bit cap must not add filters, got: %v", args)
+	}
+}
+
+func TestFFmpeg_RealFFmpeg_QualityDownsample(t *testing.T) {
+	ffmpegPath, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg not installed in PATH, skipping real ffmpeg test")
+	}
+
+	tmpDir := t.TempDir()
+	sourceAudio := filepath.Join(tmpDir, "source_192_24.flac")
+
+	// Generate 1-second synthetic 192kHz / 24-bit FLAC using ffmpeg
+	cmd := exec.Command(ffmpegPath, "-y",
+		"-f", "lavfi",
+		"-i", "sine=frequency=440:sample_rate=192000:duration=1",
+		"-c:a", "flac",
+		"-sample_fmt", "s32",
+		"-bits_per_raw_sample", "24",
+		sourceAudio,
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to generate synthetic 192k/24b flac: %v (out: %s)", err, out)
+	}
+
+	// Verify source audio properties
+	srcInfo, err := audio.Probe(sourceAudio)
+	if err != nil {
+		t.Fatalf("failed to probe source audio format: %v", err)
+	}
+	srcFmt := srcInfo.Format
+	if srcFmt.SampleRate != 192000 || srcFmt.Bits != 24 {
+		t.Fatalf("expected source 192000Hz/24bit, got %dHz/%dbit", srcFmt.SampleRate, srcFmt.Bits)
+	}
+
+	cutter, err := NewFFmpeg(ffmpegPath, nil)
+	if err != nil {
+		t.Fatalf("NewFFmpeg failed: %v", err)
+	}
+
+	artworkPath := filepath.Join(tmpDir, "cover.jpg")
+	artCmd := exec.Command(ffmpegPath, "-y", "-f", "lavfi", "-i", "color=c=blue:s=100x100:d=1", "-frames:v", "1", artworkPath)
+	if out, err := artCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to generate test cover art: %v (out: %s)", err, out)
+	}
+
+	tests := []struct {
+		name               string
+		targetSampleRate   int
+		targetBits         int
+		withArtwork        bool
+		expectedSampleRate int
+		expectedBits       int
+	}{
+		{
+			name:               "Downsample to 96kHz 24bit (rate only)",
+			targetSampleRate:   96000,
+			targetBits:         0,
+			expectedSampleRate: 96000,
+			expectedBits:       24,
+		},
+		{
+			name:               "Downsample to 96kHz 24bit (explicit rate and bits)",
+			targetSampleRate:   96000,
+			targetBits:         24,
+			expectedSampleRate: 96000,
+			expectedBits:       24,
+		},
+		{
+			name:               "Downsample to 44.1kHz 16bit (rate and dithered 16bit)",
+			targetSampleRate:   44100,
+			targetBits:         16,
+			expectedSampleRate: 44100,
+			expectedBits:       16,
+		},
+		{
+			name:               "Downsample to 44.1kHz 16bit with artwork (verifies frame_size 4096)",
+			targetSampleRate:   44100,
+			targetBits:         16,
+			withArtwork:        true,
+			expectedSampleRate: 44100,
+			expectedBits:       16,
+		},
+	}
+
+	afplayPath, _ := exec.LookPath("afplay")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			outputPath := filepath.Join(tmpDir, tt.name+".flac")
+			req := track.Slice{
+				SourceAudioPath:  sourceAudio,
+				Start:            0,
+				End:              0.5,
+				TargetSampleRate: tt.targetSampleRate,
+				TargetBits:       tt.targetBits,
+			}
+			if tt.withArtwork {
+				req.ArtworkPath = artworkPath
+			}
+
+			if err := cutter.Cut(context.Background(), req, outputPath); err != nil {
+				t.Fatalf("cutter.Cut failed: %v", err)
+			}
+
+			outInfo, err := audio.Probe(outputPath)
+			if err != nil {
+				t.Fatalf("failed to probe output audio format: %v", err)
+			}
+			outFmt := outInfo.Format
+
+			if outFmt.SampleRate != tt.expectedSampleRate {
+				t.Errorf("expected sample rate %d, got %d", tt.expectedSampleRate, outFmt.SampleRate)
+			}
+			if outFmt.Bits != tt.expectedBits {
+				t.Errorf("expected bit depth %d, got %d", tt.expectedBits, outFmt.Bits)
+			}
+
+			// If running on macOS with afplay available, verify CoreAudio can play the file without fmt? error
+			if afplayPath != "" {
+				cmd := exec.Command(afplayPath, "-t", "0.1", outputPath)
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Errorf("afplay failed on %s: %v (out: %s)", tt.name, err, out)
+				}
+			}
+		})
 	}
 }

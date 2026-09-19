@@ -46,6 +46,12 @@ type Options struct {
 	Debug      bool         // If true, enables verbose debug logging
 	Logger     *slog.Logger // Optional structured logger. If nil, a default text logger is used with level based on Debug.
 	Slicer     TrackSlicer  // Optional audio slicer implementation. If nil, virtual track playback is disabled (Open returns ENOSYS).
+
+	// MaxQuality optionally caps the output format of sliced tracks.
+	// Sources strictly above the cap in bit depth or sample rate are lowered
+	// to it; sources at or below the cap keep their original format.
+	// Zero Quality (default) preserves the source format for every track.
+	MaxQuality track.Quality
 }
 
 // EnsureDefaults fills in zero-value fields with production-ready defaults.
@@ -88,11 +94,13 @@ func New(opts Options) *VFS {
 	opts.EnsureDefaults()
 
 	ctx, cancel := context.WithCancel(context.Background())
+	cache := NewAlbumCache(opts.Logger)
+	cache.maxQuality = opts.MaxQuality
 	return &VFS{
 		sourceRoot: opts.SourceRoot,
 		keepAlbum:  opts.KeepAlbum,
 		logger:     opts.Logger,
-		cache:      NewAlbumCache(opts.Logger),
+		cache:      cache,
 		slicer:     opts.Slicer,
 		ctx:        ctx,
 		cancel:     cancel,

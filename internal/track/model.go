@@ -6,8 +6,9 @@ package track
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
+	"maps"
 	"slices"
+	"strconv"
 	"time"
 )
 
@@ -21,6 +22,11 @@ type Slice struct {
 	Start           float64 // Start offset in seconds
 	End             float64 // End offset in seconds (0 means until EOF)
 	ArtworkPath     string  // Optional path to cover image to embed
+
+	// Output targets derived from the mount's quality cap and the probed
+	// source format. Zeros mean "keep the source format untouched".
+	TargetSampleRate int // Resample to this rate (Hz) when the source is above the cap
+	TargetBits       int // Encode at this bit depth when the source is above the cap
 
 	Tags map[string]string // Key-value metadata tags (e.g. title, artist, album, track, date, genre, disc)
 }
@@ -40,26 +46,40 @@ func (s Slice) Tag(key string) string {
 // The key is a 16-character hex prefix of SHA-256.
 func (s Slice) Key() string {
 	hasher := sha256.New()
-	buf := fmt.Appendf(nil, "%s:%d:%d:%.4f:%.4f:%s",
-		s.SourceAudioPath,
-		s.SourceModTime.UnixNano(),
-		s.SourceSize,
-		s.Start,
-		s.End,
-		s.ArtworkPath,
-	)
+	var buf [256]byte
+	b := buf[:0]
+
+	b = append(b, s.SourceAudioPath...)
+	b = append(b, ':')
+	b = strconv.AppendInt(b, s.SourceModTime.UnixNano(), 10)
+	b = append(b, ':')
+	b = strconv.AppendInt(b, s.SourceSize, 10)
+	b = append(b, ':')
+	b = strconv.AppendFloat(b, s.Start, 'f', 4, 64)
+	b = append(b, ':')
+	b = strconv.AppendFloat(b, s.End, 'f', 4, 64)
+	b = append(b, ':')
+	b = append(b, s.ArtworkPath...)
+	b = append(b, ":t"...)
+	b = strconv.AppendInt(b, int64(s.TargetSampleRate), 10)
+	b = append(b, ":b"...)
+	b = strconv.AppendInt(b, int64(s.TargetBits), 10)
+	hasher.Write(b)
+
 	if len(s.Tags) > 0 {
-		keys := make([]string, 0, len(s.Tags))
-		for k := range s.Tags {
-			keys = append(keys, k)
-		}
-		slices.Sort(keys)
-		for _, k := range keys {
+		for _, k := range slices.Sorted(maps.Keys(s.Tags)) {
 			if v := s.Tags[k]; v != "" {
-				buf = fmt.Appendf(buf, ":%s=%s", k, v)
+				b = buf[:0]
+				b = append(b, ':')
+				b = append(b, k...)
+				b = append(b, '=')
+				b = append(b, v...)
+				hasher.Write(b)
 			}
 		}
 	}
-	hasher.Write(buf)
-	return hex.EncodeToString(hasher.Sum(nil))[:16]
+
+	var sum [sha256.Size]byte
+	digest := hasher.Sum(sum[:0])
+	return hex.EncodeToString(digest[:8])
 }

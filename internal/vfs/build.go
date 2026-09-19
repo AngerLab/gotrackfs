@@ -25,6 +25,12 @@ const (
 	// minEstimatedTrackFloor provides a reasonable minimum size floor (1 MB) for very short tracks
 	// or corrupted estimates to prevent undersized buffer allocations by media players.
 	minEstimatedTrackFloor = 1024 * 1024
+
+	// wavToFlacSizeRatio approximates how much a raw PCM WAV shrinks when sliced
+	// into a FLAC (lossless) track. Slices are always written as FLAC, so WAV
+	// sources would otherwise be overestimated by the raw PCM size. ~0.6 is a
+	// conservative average for typical music content.
+	wavToFlacSizeRatio = 0.60
 )
 
 // dirFacts captures directory metadata required for cache validation.
@@ -34,7 +40,8 @@ type dirFacts struct {
 
 // buildDirState discovers CUE and audio files in dirPath, parses them,
 // and computes the DirState along with dirFacts for caching.
-func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger) (*DirState, *dirFacts, error) {
+// maxQuality optionally caps the sliced-track output format (zero = keep source).
+func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger, maxQuality track.Quality) (*DirState, *dirFacts, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -88,9 +95,33 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger) (*Dir
 		}
 		claimedAudios[audioPath] = true
 
-		totalAudioDuration, durErr := audio.ProbeDuration(audioPath)
-		if durErr != nil {
-			logger.Debug("vfs: failed to probe audio duration", "audio", audioPath, "error", durErr)
+		audioInfo, probeErr := audio.Probe(audioPath)
+		if probeErr != nil {
+			logger.Debug("vfs: failed to probe audio file", "audio", audioPath, "error", probeErr)
+		}
+		totalAudioDuration := audioInfo.Duration
+
+		// Quality cap: probe the source format once per album and lower cuts
+		// that exceed it. Unset cap leaves every slice in the source format.
+		var targetRate, targetBits int
+		srcFmt := audioInfo.Format
+		if !maxQuality.Unset() && probeErr == nil {
+			targetRate, targetBits = maxQuality.Plan(srcFmt.SampleRate, srcFmt.Bits)
+			if targetRate == 0 && targetBits == 0 {
+				logger.Debug("vfs: source already at or below quality cap", "audio", audioPath, "cap", maxQuality.String())
+			}
+		}
+
+		qualityRatio := 1.0
+		if srcFmt.SampleRate > 0 && targetRate > 0 {
+			qualityRatio *= float64(targetRate) / float64(srcFmt.SampleRate)
+		}
+		if srcFmt.Bits > 0 && targetBits > 0 {
+			qualityRatio *= float64(targetBits) / float64(srcFmt.Bits)
+		}
+		if ext := strings.ToLower(filepath.Ext(audioPath)); ext == ".wav" || ext == ".wave" {
+			// WAV is uncompressed PCM; FLAC encodes it down to ~60% of the raw bytes.
+			qualityRatio *= wavToFlacSizeRatio
 		}
 
 		totalAudioSize := audioFi.Size()
@@ -133,9 +164,9 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger) (*Dir
 
 			estimatedSize := int64(0)
 			if trackDuration > 0 && totalKnownDuration > 0 {
-				estimatedSize = int64(float64(totalAudioSize) * (trackDuration / totalKnownDuration) * estimationSafetyMargin)
+				estimatedSize = int64(float64(totalAudioSize) * (trackDuration / totalKnownDuration) * qualityRatio * estimationSafetyMargin)
 			} else {
-				estimatedSize = int64(float64(totalAudioSize) / float64(len(tracks)) * estimationSafetyMargin)
+				estimatedSize = int64(float64(totalAudioSize) / float64(len(tracks)) * qualityRatio * estimationSafetyMargin)
 			}
 			if estimatedSize < minEstimatedTrackFloor {
 				estimatedSize = minEstimatedTrackFloor
@@ -182,12 +213,14 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger) (*Dir
 				Performer:     tr.Performer,
 				EstimatedSize: estimatedSize,
 				Slice: track.Slice{
-					SourceAudioPath: audioPath,
-					SourceModTime:   audioFi.ModTime(),
-					SourceSize:      audioFi.Size(),
-					Start:           tr.Start,
-					End:             tr.End,
-					Tags:            tags,
+					SourceAudioPath:  audioPath,
+					SourceModTime:    audioFi.ModTime(),
+					SourceSize:       audioFi.Size(),
+					Start:            tr.Start,
+					End:              tr.End,
+					TargetSampleRate: targetRate,
+					TargetBits:       targetBits,
+					Tags:             tags,
 				},
 			}
 		}

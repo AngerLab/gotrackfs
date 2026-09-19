@@ -79,8 +79,11 @@ func (c *FFmpegCutter) BuildArgs(req track.Slice, outputPath string) []string {
 		args = append(args, "-c:v", "copy", "-disposition:v:0", "attached_pic")
 	}
 
-	// Output codec: FLAC with fast compression
-	args = append(args, "-c:a", "flac", "-compression_level", "1")
+	// Output codec: FLAC with fast compression and fixed standard block size (4096).
+	// Specifying -frame_size 4096 avoids degenerate block sizes (e.g. 160 frames/packet)
+	// when aresample is used alongside embedded artwork (attached_pic), which breaks
+	// Apple CoreAudio / QuickTime (error 1718449215 / fmt?).
+	args = append(args, "-c:a", "flac", "-frame_size", "4096", "-compression_level", "1")
 
 	// Quality cap targets (computed by the VFS at build time).
 	// Absent targets mean the source is kept as-is.

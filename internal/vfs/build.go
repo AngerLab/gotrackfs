@@ -98,11 +98,32 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger, maxQu
 		// Quality cap: probe the source format once per album and lower cuts
 		// that exceed it. Unset cap leaves every slice in the source format.
 		var targetRate, targetBits int
+		srcFmt := audioInfo.Format
 		if !maxQuality.Unset() && probeErr == nil {
-			targetRate, targetBits = maxQuality.Plan(audioInfo.Format.SampleRate, audioInfo.Format.Bits)
+			targetRate, targetBits = maxQuality.Plan(srcFmt.SampleRate, srcFmt.Bits)
 			if targetRate == 0 && targetBits == 0 {
 				logger.Debug("vfs: source already at or below quality cap", "audio", audioPath, "cap", maxQuality.String())
 			}
+		}
+
+		qualityRatio := float64(1)
+		if srcFmt.SampleRate > 0 && srcFmt.Bits > 0 {
+			effectiveRate := srcFmt.SampleRate
+			if targetRate > 0 {
+				effectiveRate = targetRate
+			}
+			effectiveBits := srcFmt.Bits
+			if targetBits > 0 {
+				effectiveBits = targetBits
+			}
+			qualityRatio = (float64(effectiveRate) / float64(srcFmt.SampleRate)) * (float64(effectiveBits) / float64(srcFmt.Bits))
+			if qualityRatio > 1 {
+				qualityRatio = 1
+			}
+		}
+		if ext := strings.ToLower(filepath.Ext(audioPath)); ext == ".wav" || ext == ".wave" {
+			// WAV is uncompressed PCM; FLAC encodes it to ~60% of raw PCM size.
+			qualityRatio *= 0.60
 		}
 
 		totalAudioSize := audioFi.Size()
@@ -145,9 +166,9 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger, maxQu
 
 			estimatedSize := int64(0)
 			if trackDuration > 0 && totalKnownDuration > 0 {
-				estimatedSize = int64(float64(totalAudioSize) * (trackDuration / totalKnownDuration) * estimationSafetyMargin)
+				estimatedSize = int64(float64(totalAudioSize) * (trackDuration / totalKnownDuration) * qualityRatio * estimationSafetyMargin)
 			} else {
-				estimatedSize = int64(float64(totalAudioSize) / float64(len(tracks)) * estimationSafetyMargin)
+				estimatedSize = int64(float64(totalAudioSize) / float64(len(tracks)) * qualityRatio * estimationSafetyMargin)
 			}
 			if estimatedSize < minEstimatedTrackFloor {
 				estimatedSize = minEstimatedTrackFloor

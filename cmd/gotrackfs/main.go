@@ -1,7 +1,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"log"
 	"log/slog"
@@ -15,6 +14,7 @@ import (
 	"github.com/AngerLab/gotrackfs/internal/track"
 	"github.com/AngerLab/gotrackfs/internal/vfs"
 
+	flag "github.com/spf13/pflag"
 	"github.com/winfsp/cgofuse/fuse"
 )
 
@@ -41,25 +41,25 @@ func main() {
 	flag.Parse()
 
 	args := flag.Args()
-	if len(args) < 2 {
+	if len(args) != 2 {
 		flag.Usage()
 		os.Exit(2)
 	}
 
 	if cacheTTL <= 0 {
-		fmt.Fprintf(os.Stderr, "error: -cache-ttl must be positive (got %v)\n", cacheTTL)
+		fmt.Fprintf(os.Stderr, "error: --cache-ttl must be positive (got %v)\n", cacheTTL)
 		os.Exit(2)
 	}
 
 	bits, err := track.ParseBits(maxBits)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: -max-bits: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error: --max-bits: %v\n", err)
 		os.Exit(2)
 	}
 
 	rate, err := track.ParseRate(maxRate)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: -max-rate: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error: --max-rate: %v\n", err)
 		os.Exit(2)
 	}
 	maxQuality := track.Quality{Bits: bits, SampleRate: rate}
@@ -140,7 +140,28 @@ func main() {
 		host.Unmount()
 	}()
 
-	fmt.Printf("Mounting gotrackfs:\n  Source:      %s\n  Mount Point: %s\nPress Ctrl+C to unmount.\n", absSource, absMount)
+	maxBitsStr := "unlimited"
+	if maxQuality.Bits > 0 {
+		maxBitsStr = fmt.Sprintf("%d-bit", maxQuality.Bits)
+	}
+	maxRateStr := "unlimited"
+	if maxQuality.SampleRate > 0 {
+		if maxQuality.SampleRate%1000 == 0 {
+			maxRateStr = fmt.Sprintf("%d kHz (%d Hz)", maxQuality.SampleRate/1000, maxQuality.SampleRate)
+		} else {
+			maxRateStr = fmt.Sprintf("%.1f kHz (%d Hz)", float64(maxQuality.SampleRate)/1000, maxQuality.SampleRate)
+		}
+	}
+
+	fmt.Printf("Mounting gotrackfs:\n"+
+		"  Source:      %s\n"+
+		"  Mount Point: %s\n"+
+		"  Max Bits:    %s\n"+
+		"  Max Rate:    %s\n"+
+		"  Cache TTL:   %v\n"+
+		"  Keep Album:  %t\n"+
+		"Press Ctrl+C to unmount.\n",
+		absSource, absMount, maxBitsStr, maxRateStr, cacheTTL, keepAlbum)
 
 	if !host.Mount(absMount, fuseOpts) {
 		log.Fatalf("failed to mount FUSE filesystem at %s", absMount)

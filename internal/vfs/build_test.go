@@ -134,11 +134,15 @@ FILE "nonexistent.flac" WAVE
 
 // makeFlacHeader builds a minimal file with a valid FLAC STREAMINFO block.
 func makeFlacHeader(rate, chans, bps uint64) []byte {
+	return makeFlacHeaderWithSamples(rate, chans, bps, 1000)
+}
+
+func makeFlacHeaderWithSamples(rate, chans, bps, totalSamples uint64) []byte {
 	var buf bytes.Buffer
 	buf.WriteString("fLaC")
 	buf.Write([]byte{0x80, 0x00, 0x00, 34})
 	var streaminfo [34]byte
-	v := rate<<44 | (chans-1)<<41 | (bps-1)<<36 | 1000
+	v := rate<<44 | (chans-1)<<41 | (bps-1)<<36 | (totalSamples & 0xFFFFFFFFF)
 	binary.BigEndian.PutUint64(streaminfo[10:18], v)
 	buf.Write(streaminfo[:])
 	buf.Write(make([]byte, 1024))
@@ -199,3 +203,58 @@ FILE "audio.flac" WAVE
 		})
 	}
 }
+
+func TestBuildDirState_EstimatedSizeScaling(t *testing.T) {
+	cueContent := `TITLE "Hi-Res Album"
+FILE "audio.flac" WAVE
+  TRACK 01 AUDIO
+    TITLE "Track 1"
+    INDEX 01 00:00:00
+  TRACK 02 AUDIO
+    TITLE "Track 2"
+    INDEX 01 01:00:00`
+
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "album.cue"), []byte(cueContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 20MB dummy audio file with 192kHz / 24-bit FLAC header, 120s duration
+	totalSamples := uint64(120 * 192000)
+	header := makeFlacHeaderWithSamples(192000, 2, 24, totalSamples)
+
+	audio := append(header, make([]byte, 20*1024*1024-len(header))...)
+	if err := os.WriteFile(filepath.Join(tmpDir, "audio.flac"), audio, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dirFi, err := os.Stat(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Without cap
+	stateNoCap, _, err := buildDirState(tmpDir, dirFi, nil, track.Quality{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	estNoCap := stateNoCap.Albums[0].Tracks[0].EstimatedSize
+
+	// 2. With 16-bit / 44.1kHz cap
+	cap16_44 := track.Quality{Bits: 16, SampleRate: 44100}
+	stateCap, _, err := buildDirState(tmpDir, dirFi, nil, cap16_44)
+	if err != nil {
+		t.Fatal(err)
+	}
+	estCap := stateCap.Albums[0].Tracks[0].EstimatedSize
+
+	// Expected ratio is (44100 / 192000) * (16 / 24) = 0.2296875 * 0.666667 = ~0.153125
+	ratio := float64(estCap) / float64(estNoCap)
+	expectedRatio := (44100.0 / 192000.0) * (16.0 / 24.0)
+
+	if ratio < expectedRatio*0.95 || ratio > expectedRatio*1.05 {
+		t.Errorf("estimated size ratio = %f, expected ~%f (noCap=%d, cap=%d)",
+			ratio, expectedRatio, estNoCap, estCap)
+	}
+}
+

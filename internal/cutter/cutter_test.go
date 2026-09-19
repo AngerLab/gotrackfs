@@ -73,6 +73,8 @@ func TestFFmpegCutter_BuildArgs(t *testing.T) {
 	assertArgContains("attached_pic")
 	assertArgContains("-c:a")
 	assertArgContains("flac")
+	assertArgContains("-frame_size")
+	assertArgContains("4096")
 	assertArgContains("-compression_level")
 	assertArgContains("1")
 	assertArgContains("-metadata")
@@ -631,10 +633,17 @@ func TestFFmpegCutter_RealFFmpeg_QualityDownsample(t *testing.T) {
 		t.Fatalf("NewFFmpegCutter failed: %v", err)
 	}
 
+	artworkPath := filepath.Join(tmpDir, "cover.jpg")
+	artCmd := exec.Command(ffmpegPath, "-y", "-f", "lavfi", "-i", "color=c=blue:s=100x100:d=1", "-frames:v", "1", artworkPath)
+	if out, err := artCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to generate test cover art: %v (out: %s)", err, out)
+	}
+
 	tests := []struct {
 		name               string
 		targetSampleRate   int
 		targetBits         int
+		withArtwork        bool
 		expectedSampleRate int
 		expectedBits       int
 	}{
@@ -659,7 +668,17 @@ func TestFFmpegCutter_RealFFmpeg_QualityDownsample(t *testing.T) {
 			expectedSampleRate: 44100,
 			expectedBits:       16,
 		},
+		{
+			name:               "Downsample to 44.1kHz 16bit with artwork (verifies frame_size 4096)",
+			targetSampleRate:   44100,
+			targetBits:         16,
+			withArtwork:        true,
+			expectedSampleRate: 44100,
+			expectedBits:       16,
+		},
 	}
+
+	afplayPath, _ := exec.LookPath("afplay")
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -670,6 +689,9 @@ func TestFFmpegCutter_RealFFmpeg_QualityDownsample(t *testing.T) {
 				End:              0.5,
 				TargetSampleRate: tt.targetSampleRate,
 				TargetBits:       tt.targetBits,
+			}
+			if tt.withArtwork {
+				req.ArtworkPath = artworkPath
 			}
 
 			if err := cutter.Cut(context.Background(), req, outputPath); err != nil {
@@ -687,6 +709,14 @@ func TestFFmpegCutter_RealFFmpeg_QualityDownsample(t *testing.T) {
 			}
 			if outFmt.Bits != tt.expectedBits {
 				t.Errorf("expected bit depth %d, got %d", tt.expectedBits, outFmt.Bits)
+			}
+
+			// If running on macOS with afplay available, verify CoreAudio can play the file without fmt? error
+			if afplayPath != "" {
+				cmd := exec.Command(afplayPath, "-t", "0.1", outputPath)
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Errorf("afplay failed on %s: %v (out: %s)", tt.name, err, out)
+				}
 			}
 		})
 	}

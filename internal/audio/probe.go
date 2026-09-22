@@ -2,6 +2,7 @@ package audio
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 )
@@ -26,9 +27,12 @@ type Info struct {
 }
 
 // Probe reads container headers (FLAC STREAMINFO or WAV fmt/data chunks) once in pure Go.
-// If the container is not FLAC/WAV or direct header parsing fails, it falls back to ffprobe.
+// If the container is not FLAC/WAV, direct header parsing fails, or WAV duration cannot be determined,
+// it falls back to ffprobe. On total failure, it wraps ErrNotSupported with underlying diagnostic causes.
 func Probe(filePath string) (Info, error) {
 	ext := strings.ToLower(filepath.Ext(filePath))
+	var directErr error
+
 	switch ext {
 	case ".flac":
 		flacInfo, err := probeFLACInfo(filePath)
@@ -42,23 +46,37 @@ func Probe(filePath string) (Info, error) {
 				Format:   flacInfo.Format,
 			}, nil
 		}
+		if err != nil {
+			directErr = fmt.Errorf("flac parser: %w", err)
+		} else {
+			directErr = errors.New("flac parser: zero sample rate")
+		}
+
 	case ".wav", ".wave":
 		wavInfo, err := probeWAVInfo(filePath)
-		if err == nil && wavInfo.HasFmt && wavInfo.Format.SampleRate > 0 {
-			var dur float64
-			if wavInfo.ByteRate > 0 && wavInfo.DataSize > 0 {
-				dur = float64(wavInfo.DataSize) / float64(wavInfo.ByteRate)
-			}
+		if err == nil && wavInfo.HasFmt && wavInfo.Format.SampleRate > 0 && wavInfo.ByteRate > 0 && wavInfo.DataSize > 0 {
+			dur := float64(wavInfo.DataSize) / float64(wavInfo.ByteRate)
 			return Info{
 				Duration: dur,
 				Format:   wavInfo.Format,
 			}, nil
 		}
+		if err != nil {
+			directErr = fmt.Errorf("wav parser: %w", err)
+		} else if !wavInfo.HasFmt || wavInfo.Format.SampleRate == 0 {
+			directErr = errors.New("wav parser: missing or invalid fmt chunk")
+		} else {
+			directErr = errors.New("wav parser: data chunk missing or zero size")
+		}
+
+	default:
+		directErr = fmt.Errorf("unsupported container extension %q", ext)
 	}
 
-	info, err := probeWithFFprobe(filePath)
-	if err == nil {
+	info, ffprobeErr := probeWithFFprobe(filePath)
+	if ffprobeErr == nil {
 		return info, nil
 	}
-	return Info{}, ErrNotSupported
+
+	return Info{}, fmt.Errorf("%w (direct: %v; ffprobe: %v)", ErrNotSupported, directErr, ffprobeErr)
 }

@@ -20,7 +20,7 @@ jobs:
 
       - name: Install FUSE headers (Linux build dependency)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libfuse3-dev
+        run: sudo apt-get update && sudo apt-get install -y libfuse3-dev ffmpeg
 
       - name: Install FUSE-T headers (macOS build dependency)
         if: runner.os == 'macOS'

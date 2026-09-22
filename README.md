@@ -25,9 +25,10 @@ SOURCE/Artist/Album/           VIRTUAL/Artist/Album/
 - **On-demand slicing** — tracks are materialized only when opened, cached with
   reference counting + TTL, and aborted when all waiting readers go away.
   ffmpeg concurrency is bounded; every cut has a timeout.
-- **Exact metadata without ffmpeg** — track durations are read directly from
-  FLAC `STREAMINFO` / WAVE headers (pure Go, no external tools), so the last
-  track gets exact bounds and reported sizes are honest after the first slice.
+- **Exact metadata without ffmpeg (when possible)** — track durations are read directly from
+  FLAC `STREAMINFO` / WAVE headers in pure Go (no external tools), while non-FLAC/WAV
+  formats (WV, APE, M4A, etc.) or streaming containers automatically fall back to `ffprobe`.
+  The last track gets exact bounds and reported sizes are honest after the first slice.
 - **Cache that doesn't lie** — directory state is invalidated by filesystem facts
   (directory mtime), the slicer cache is keyed by *all* cut inputs including the
   source file's mtime/size. Concurrent callers share one parse / one cut (singleflight).

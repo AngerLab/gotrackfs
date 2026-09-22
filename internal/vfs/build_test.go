@@ -311,3 +311,38 @@ FILE "audio.flac" WAVE
 			ratio, expectedRatio, estNoCap, estCap)
 	}
 }
+
+func TestBuildDirState_NonFlacAudioProducesFlacTracks(t *testing.T) {
+	for _, ext := range []string{".wv", ".ape", ".wav", ".mp3", ".m4a"} {
+		t.Run(ext, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			cueContent := `TITLE "Album"
+PERFORMER "Artist"
+FILE "audio` + ext + `" WAVE
+  TRACK 01 AUDIO
+    TITLE "Track 1"
+    INDEX 01 00:00:00`
+
+			if err := os.WriteFile(filepath.Join(tmpDir, "album.cue"), []byte(cueContent), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(tmpDir, "audio"+ext), make([]byte, 1024*1024), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			dirFi, err := os.Stat(tmpDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			state, _, err := buildDirState(tmpDir, dirFi, nil, track.Quality{})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if _, ok := state.TracksByName["01. Track 1.flac"]; !ok {
+				t.Errorf("for source %s, expected track name '01. Track 1.flac', got tracks: %+v", ext, state.TracksByName)
+			}
+		})
+	}
+}

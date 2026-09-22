@@ -384,7 +384,7 @@ func TestProbe_FFprobeRunnerMock(t *testing.T) {
 
 	t.Run("non-flac file calls ffprobe runner", func(t *testing.T) {
 		called := false
-		ffprobeRunner = func(ctx context.Context, binPath string, args ...string) ([]byte, error) {
+		ffprobeRunner = func(ctx context.Context, filePath string, args ...string) ([]byte, error) {
 			called = true
 			return []byte(`{
 				"streams": [{
@@ -416,7 +416,7 @@ func TestProbe_FFprobeRunnerMock(t *testing.T) {
 
 	t.Run("broken flac falls back to ffprobe", func(t *testing.T) {
 		called := false
-		ffprobeRunner = func(ctx context.Context, binPath string, args ...string) ([]byte, error) {
+		ffprobeRunner = func(ctx context.Context, filePath string, args ...string) ([]byte, error) {
 			called = true
 			return []byte(`{
 				"streams": [{
@@ -448,7 +448,7 @@ func TestProbe_FFprobeRunnerMock(t *testing.T) {
 
 	t.Run("wav with missing data chunk falls back to ffprobe", func(t *testing.T) {
 		called := false
-		ffprobeRunner = func(ctx context.Context, binPath string, args ...string) ([]byte, error) {
+		ffprobeRunner = func(ctx context.Context, filePath string, args ...string) ([]byte, error) {
 			called = true
 			return []byte(`{
 				"streams": [{
@@ -493,7 +493,7 @@ func TestProbe_FFprobeRunnerMock(t *testing.T) {
 	})
 
 	t.Run("errors wrap ErrNotSupported with underlying details", func(t *testing.T) {
-		ffprobeRunner = func(ctx context.Context, binPath string, args ...string) ([]byte, error) {
+		ffprobeRunner = func(ctx context.Context, filePath string, args ...string) ([]byte, error) {
 			return nil, errors.New("command timed out")
 		}
 

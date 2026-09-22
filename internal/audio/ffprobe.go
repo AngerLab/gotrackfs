@@ -28,23 +28,23 @@ type ffprobeOutput struct {
 	} `json:"format"`
 }
 
-// ffprobeRunner executes the ffprobe command and returns stdout.
-// It can be overridden in tests to verify JSON parsing and error handling deterministically.
-var ffprobeRunner = func(ctx context.Context, binPath string, args ...string) ([]byte, error) {
+// ffprobeRunner executes the ffprobe command for filePath and returns stdout.
+// It can be overridden in tests to verify JSON parsing and error handling
+// deterministically without requiring ffprobe to be installed.
+var ffprobeRunner = func(ctx context.Context, filePath string, args ...string) ([]byte, error) {
+	binPath, err := exec.LookPath("ffprobe")
+	if err != nil {
+		return nil, fmt.Errorf("ffprobe not found in PATH: %w", err)
+	}
 	cmd := exec.CommandContext(ctx, binPath, args...)
 	return cmd.Output()
 }
 
 func probeWithFFprobe(filePath string) (Info, error) {
-	ffprobePath, err := exec.LookPath("ffprobe")
-	if err != nil {
-		return Info{}, fmt.Errorf("ffprobe not found in PATH: %w", err)
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	out, err := ffprobeRunner(ctx, ffprobePath,
+	out, err := ffprobeRunner(ctx, filePath,
 		"-v", "error",
 		"-show_entries", "stream=codec_type,sample_rate,bits_per_raw_sample,bits_per_sample,sample_fmt,channels,duration:format=duration",
 		"-of", "json",

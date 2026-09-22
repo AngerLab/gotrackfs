@@ -7,27 +7,22 @@ import (
 	"errors"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func TestProbe_RealFile(t *testing.T) {
-	// Probe real FLAC if available in playground
-	realFlac := filepath.Join("..", "..", ".playground", "SOURCE", "Dartz - Proxima Parada", "Dartz - Proxima Parada.flac")
-	if _, err := os.Stat(realFlac); err != nil {
-		t.Skip("skipping real flac test: file not found")
-	}
-
+func TestProbe_RealFLACFile(t *testing.T) {
+	// Probe a real (ffmpeg-encoded) FLAC file committed as a test fixture,
+	// covering the pure-Go STREAMINFO parser end to end.
+	realFlac := filepath.Join("testdata", "sample.flac")
 	info, err := Probe(realFlac)
 	if err != nil {
-		t.Fatalf("Probe failed: %v", err)
+		t.Fatalf("Probe failed on real FLAC file: %v", err)
 	}
-
-	// 150468612 / 44100 = 3411.986666... seconds
-	expected := 3411.9866
-	if math.Abs(info.Duration-expected) > 0.1 {
-		t.Errorf("expected duration ~%.2f, got %.2f", expected, info.Duration)
+	if math.Abs(info.Duration-1.0) > 0.01 {
+		t.Errorf("expected duration ~1.0s, got %f", info.Duration)
 	}
 	if info.Format.SampleRate != 44100 || info.Format.Bits != 16 || info.Format.Channels != 2 {
 		t.Errorf("expected 44100/16/2, got %+v", info.Format)
@@ -210,28 +205,24 @@ func TestProbe_MalformedWAVMissingFmt(t *testing.T) {
 	}
 }
 
-func TestProbe_WavPackReal(t *testing.T) {
-	wvPath := filepath.Join("..", "..", ".playground", "SOURCE", "1989 - Человек без имени (Bomba Music, BoMB 033-832 LP, Germany 2013)", "Nautilus Pompilius - Человек без имени (LP).wv")
-	if _, err := os.Stat(wvPath); err != nil {
-		t.Skip("skipping wavpack test: file not found")
+func TestProbe_WavPackFixture(t *testing.T) {
+	// Real WavPack (.wv) file committed as a test fixture; exercises the ffprobe
+	// fallback against a genuine non-FLAC/WAV container instead of a mock.
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		t.Skip("skipping wavpack fixture test: ffprobe not found in PATH")
 	}
 
+	wvPath := filepath.Join("testdata", "sample.wv")
 	info, err := Probe(wvPath)
 	if err != nil {
 		t.Fatalf("Probe failed on real .wv file: %v", err)
 	}
 
-	if info.Duration <= 0 {
-		t.Errorf("expected positive duration, got %f", info.Duration)
+	if math.Abs(info.Duration-1.0) > 0.01 {
+		t.Errorf("expected duration ~1.0s, got %f", info.Duration)
 	}
-	if info.Format.SampleRate != 192000 {
-		t.Errorf("expected 192000 Hz, got %d", info.Format.SampleRate)
-	}
-	if info.Format.Bits != 32 && info.Format.Bits != 24 {
-		t.Errorf("expected 24 or 32 bits, got %d", info.Format.Bits)
-	}
-	if info.Format.Channels != 2 {
-		t.Errorf("expected 2 channels, got %d", info.Format.Channels)
+	if info.Format.SampleRate != 44100 || info.Format.Bits != 16 || info.Format.Channels != 2 {
+		t.Errorf("expected 44100/16/2, got %+v", info.Format)
 	}
 }
 
@@ -527,4 +518,3 @@ func TestProbe_FFprobeRunnerMock(t *testing.T) {
 		}
 	})
 }
-

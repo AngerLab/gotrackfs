@@ -56,6 +56,9 @@ func probeWAVInfo(filePath string) (wavHeaderInfo, error) {
 			info.Format.Bits = int(binary.LittleEndian.Uint16(fmtData[14:16]))
 			info.HasFmt = true
 			remaining := int64(chunkSize) - 16
+			if chunkSize%2 != 0 {
+				remaining++
+			}
 			if remaining > 0 {
 				if _, err := f.Seek(remaining, io.SeekCurrent); err != nil {
 					return info, err

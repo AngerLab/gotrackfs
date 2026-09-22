@@ -36,11 +36,8 @@ func Probe(filePath string) (Info, error) {
 	switch ext {
 	case ".flac":
 		flacInfo, err := probeFLACInfo(filePath)
-		if err == nil && flacInfo.Format.SampleRate > 0 {
-			var dur float64
-			if flacInfo.TotalSamples > 0 {
-				dur = float64(flacInfo.TotalSamples) / float64(flacInfo.Format.SampleRate)
-			}
+		if err == nil && flacInfo.Format.SampleRate > 0 && flacInfo.TotalSamples > 0 {
+			dur := float64(flacInfo.TotalSamples) / float64(flacInfo.Format.SampleRate)
 			return Info{
 				Duration: dur,
 				Format:   flacInfo.Format,
@@ -48,8 +45,10 @@ func Probe(filePath string) (Info, error) {
 		}
 		if err != nil {
 			directErr = fmt.Errorf("flac parser: %w", err)
-		} else {
+		} else if flacInfo.Format.SampleRate == 0 {
 			directErr = errors.New("flac parser: zero sample rate")
+		} else {
+			directErr = errors.New("flac parser: zero total samples (streaming FLAC)")
 		}
 
 	case ".wav", ".wave":

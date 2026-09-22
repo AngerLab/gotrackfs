@@ -369,11 +369,71 @@ func TestParseFFprobeJSON(t *testing.T) {
 		}
 	})
 
+	t.Run("only video stream error", func(t *testing.T) {
+		jsonBlob := []byte(`{
+			"streams": [
+				{
+					"codec_type": "video",
+					"duration": "100.0"
+				}
+			],
+			"format": { "duration": "100.0" }
+		}`)
+		if _, err := parseFFprobeJSON(jsonBlob); err == nil {
+			t.Error("expected error when no audio stream is present in streams array")
+		}
+	})
+
 	t.Run("malformed json error", func(t *testing.T) {
 		if _, err := parseFFprobeJSON([]byte("{not valid json")); err == nil {
 			t.Error("expected unmarshal error")
 		}
 	})
+}
+
+func TestProbe_WAVOddFmtChunkPadding(t *testing.T) {
+	tmpDir := t.TempDir()
+	wavPath := filepath.Join(tmpDir, "odd_fmt.wav")
+
+	// RIFF header
+	// fmt chunk: 17 bytes (odd!), so there is 1 byte padding after fmt chunk
+	// data chunk: 8 bytes
+	var buf bytes.Buffer
+	buf.WriteString("RIFF")
+	binary.Write(&buf, binary.LittleEndian, uint32(4+8+18+8+8)) // RIFF length
+	buf.WriteString("WAVE")
+
+	// fmt chunk (17 bytes: 16 bytes format + 1 extra byte)
+	buf.WriteString("fmt ")
+	binary.Write(&buf, binary.LittleEndian, uint32(17))     // chunkSize = 17 (odd)
+	binary.Write(&buf, binary.LittleEndian, uint16(1))      // PCM
+	binary.Write(&buf, binary.LittleEndian, uint16(2))      // 2 channels
+	binary.Write(&buf, binary.LittleEndian, uint32(44100))  // sample rate
+	binary.Write(&buf, binary.LittleEndian, uint32(176400)) // byte rate
+	binary.Write(&buf, binary.LittleEndian, uint16(4))      // block align
+	binary.Write(&buf, binary.LittleEndian, uint16(16))     // bits per sample
+	buf.WriteByte(0x00)                                     // 17th byte of fmt chunk
+	buf.WriteByte(0x00)                                     // pad byte (to make 18 bytes on disk)
+
+	// data chunk
+	buf.WriteString("data")
+	binary.Write(&buf, binary.LittleEndian, uint32(176400)) // 1 second of audio
+	buf.Write(make([]byte, 176400))
+
+	if err := os.WriteFile(wavPath, buf.Bytes(), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := Probe(wavPath)
+	if err != nil {
+		t.Fatalf("Probe failed on WAV with odd fmt chunk: %v", err)
+	}
+	if math.Abs(info.Duration-1.0) > 0.001 {
+		t.Errorf("expected duration 1.0s, got %f", info.Duration)
+	}
+	if info.Format.SampleRate != 44100 || info.Format.Bits != 16 || info.Format.Channels != 2 {
+		t.Errorf("unexpected format: %+v", info.Format)
+	}
 }
 
 func TestProbe_FFprobeRunnerMock(t *testing.T) {
@@ -384,7 +444,7 @@ func TestProbe_FFprobeRunnerMock(t *testing.T) {
 
 	t.Run("non-flac file calls ffprobe runner", func(t *testing.T) {
 		called := false
-		ffprobeRunner = func(ctx context.Context, filePath string, args ...string) ([]byte, error) {
+		ffprobeRunner = func(ctx context.Context, args ...string) ([]byte, error) {
 			called = true
 			return []byte(`{
 				"streams": [{
@@ -416,7 +476,7 @@ func TestProbe_FFprobeRunnerMock(t *testing.T) {
 
 	t.Run("broken flac falls back to ffprobe", func(t *testing.T) {
 		called := false
-		ffprobeRunner = func(ctx context.Context, filePath string, args ...string) ([]byte, error) {
+		ffprobeRunner = func(ctx context.Context, args ...string) ([]byte, error) {
 			called = true
 			return []byte(`{
 				"streams": [{
@@ -446,9 +506,50 @@ func TestProbe_FFprobeRunnerMock(t *testing.T) {
 		}
 	})
 
+	t.Run("flac with zero total samples falls back to ffprobe", func(t *testing.T) {
+		called := false
+		ffprobeRunner = func(ctx context.Context, args ...string) ([]byte, error) {
+			called = true
+			return []byte(`{
+				"streams": [{
+					"codec_type": "audio",
+					"sample_rate": "44100",
+					"channels": 2,
+					"bits_per_raw_sample": "16"
+				}],
+				"format": { "duration": "123.4" }
+			}`), nil
+		}
+
+		// Valid FLAC header with TotalSamples == 0
+		var buf bytes.Buffer
+		buf.WriteString("fLaC")
+		buf.Write([]byte{0x80, 0x00, 0x00, 34}) // isLast=1, type=0, len=34
+		var streaminfo [34]byte
+		v := uint64(44100)<<44 | uint64(1)<<41 | uint64(15)<<36 | 0 // 0 total samples
+		binary.BigEndian.PutUint64(streaminfo[10:18], v)
+		buf.Write(streaminfo[:])
+
+		p := filepath.Join(tmpDir, "stream.flac")
+		if err := os.WriteFile(p, buf.Bytes(), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		info, err := Probe(p)
+		if err != nil {
+			t.Fatalf("expected fallback to succeed, got %v", err)
+		}
+		if !called {
+			t.Error("expected ffprobe to be called when FLAC has TotalSamples == 0")
+		}
+		if math.Abs(info.Duration-123.4) > 0.001 {
+			t.Errorf("expected duration 123.4 from ffprobe, got %f", info.Duration)
+		}
+	})
+
 	t.Run("wav with missing data chunk falls back to ffprobe", func(t *testing.T) {
 		called := false
-		ffprobeRunner = func(ctx context.Context, filePath string, args ...string) ([]byte, error) {
+		ffprobeRunner = func(ctx context.Context, args ...string) ([]byte, error) {
 			called = true
 			return []byte(`{
 				"streams": [{
@@ -493,7 +594,7 @@ func TestProbe_FFprobeRunnerMock(t *testing.T) {
 	})
 
 	t.Run("errors wrap ErrNotSupported with underlying details", func(t *testing.T) {
-		ffprobeRunner = func(ctx context.Context, filePath string, args ...string) ([]byte, error) {
+		ffprobeRunner = func(ctx context.Context, args ...string) ([]byte, error) {
 			return nil, errors.New("command timed out")
 		}
 

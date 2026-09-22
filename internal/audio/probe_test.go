@@ -206,3 +206,28 @@ func TestProbe_MalformedWAVMissingFmt(t *testing.T) {
 		t.Error("expected error for WAV missing fmt chunk")
 	}
 }
+
+func TestProbe_WavPackReal(t *testing.T) {
+	wvPath := filepath.Join("..", "..", ".playground", "SOURCE", "1989 - Человек без имени (Bomba Music, BoMB 033-832 LP, Germany 2013)", "Nautilus Pompilius - Человек без имени (LP).wv")
+	if _, err := os.Stat(wvPath); err != nil {
+		t.Skip("skipping wavpack test: file not found")
+	}
+
+	info, err := Probe(wvPath)
+	if err != nil {
+		t.Fatalf("Probe failed on real .wv file: %v", err)
+	}
+
+	if info.Duration <= 0 {
+		t.Errorf("expected positive duration, got %f", info.Duration)
+	}
+	if info.Format.SampleRate != 192000 {
+		t.Errorf("expected 192000 Hz, got %d", info.Format.SampleRate)
+	}
+	if info.Format.Bits != 32 && info.Format.Bits != 24 {
+		t.Errorf("expected 24 or 32 bits, got %d", info.Format.Bits)
+	}
+	if info.Format.Channels != 2 {
+		t.Errorf("expected 2 channels, got %d", info.Format.Channels)
+	}
+}

@@ -329,11 +329,9 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger, maxQu
 
 // assignTrackFilenames computes collision-free track filenames for an album against a set of already occupied names,
 // assigning numerical suffixes (e.g. "01. Title (2).flac") when conflicts arise.
+// Sliced tracks are always FLAC, so virtual track files always use the .flac extension.
 func assignTrackFilenames(album *Album, occupiedNames map[string]bool, context string, logger *slog.Logger) map[string]*VirtualTrack {
-	ext := filepath.Ext(album.SourceAudioPath)
-	if ext == "" {
-		ext = ".flac"
-	}
+	const ext = ".flac"
 
 	tracksByName := make(map[string]*VirtualTrack, len(album.Tracks))
 	for i := range album.Tracks {

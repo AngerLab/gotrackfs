@@ -346,3 +346,127 @@ FILE "audio` + ext + `" WAVE
 		})
 	}
 }
+
+func TestBuildDirState_MultiFileCueVinylRip(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	cueContent := `PERFORMER "Johnny Cash"
+TITLE "American Recordings"
+FILE "side_a.flac" FLAC
+  TRACK 01 AUDIO
+    TITLE "Track 1"
+    INDEX 01 00:00:00
+  TRACK 02 AUDIO
+    TITLE "Track 2"
+    INDEX 01 03:00:00
+FILE "side_b.flac" FLAC
+  TRACK 03 AUDIO
+    TITLE "Track 3"
+    INDEX 01 00:00:00
+  TRACK 04 AUDIO
+    TITLE "Track 4"
+    INDEX 01 04:00:00
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "album.cue"), []byte(cueContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	sideAPath := filepath.Join(tmpDir, "side_a.flac")
+	sideBPath := filepath.Join(tmpDir, "side_b.flac")
+	if err := os.WriteFile(sideAPath, make([]byte, 1024*1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sideBPath, make([]byte, 1024*1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	dirFi, err := os.Stat(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	state, facts, err := buildDirState(tmpDir, dirFi, nil, track.Quality{})
+	if err != nil {
+		t.Fatalf("unexpected error building state: %v", err)
+	}
+	if state == nil {
+		t.Fatalf("expected non-nil DirState for multi-file CUE with multi-track files")
+	}
+	if len(state.Albums) != 1 {
+		t.Fatalf("expected 1 album, got %d", len(state.Albums))
+	}
+	album := state.Albums[0]
+	if len(album.Tracks) != 4 {
+		t.Fatalf("expected 4 tracks, got %d", len(album.Tracks))
+	}
+
+	// Tracks 1 & 2 should point to side_a.flac
+	for _, num := range []int{1, 2} {
+		tr := album.Tracks[num-1]
+		if tr.Slice.SourceAudioPath != sideAPath {
+			t.Errorf("track %d SourceAudioPath = %s, want %s", num, tr.Slice.SourceAudioPath, sideAPath)
+		}
+	}
+
+	// Tracks 3 & 4 should point to side_b.flac
+	for _, num := range []int{3, 4} {
+		tr := album.Tracks[num-1]
+		if tr.Slice.SourceAudioPath != sideBPath {
+			t.Errorf("track %d SourceAudioPath = %s, want %s", num, tr.Slice.SourceAudioPath, sideBPath)
+		}
+	}
+
+	// Both side monoliths should be hidden
+	if !state.HiddenMonoliths["side_a.flac"] {
+		t.Errorf("expected side_a.flac to be hidden")
+	}
+	if !state.HiddenMonoliths["side_b.flac"] {
+		t.Errorf("expected side_b.flac to be hidden")
+	}
+
+	if facts == nil || facts.dirModTime.IsZero() {
+		t.Errorf("expected valid facts")
+	}
+}
+
+func TestBuildDirState_MultiFileCueAlreadySplitPerTrack(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Multi-file CUE where every file has only 1 track
+	cueContent := `TITLE "Split Album"
+PERFORMER "Artist"
+FILE "track01.flac" WAVE
+  TRACK 01 AUDIO
+    TITLE "Track 1"
+    INDEX 01 00:00:00
+FILE "track02.flac" WAVE
+  TRACK 02 AUDIO
+    TITLE "Track 2"
+    INDEX 01 00:00:00
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "album.cue"), []byte(cueContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "track01.flac"), make([]byte, 1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "track02.flac"), make([]byte, 1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	dirFi, err := os.Stat(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	state, facts, err := buildDirState(tmpDir, dirFi, nil, track.Quality{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if state != nil {
+		t.Errorf("expected nil state for already split multi-file CUE, got: %v", state)
+	}
+	if facts == nil || facts.dirModTime.IsZero() {
+		t.Errorf("expected valid facts")
+	}
+}

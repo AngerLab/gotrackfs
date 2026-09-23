@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/AngerLab/gotrackfs/internal/cutter"
+	"github.com/AngerLab/gotrackfs/internal/hostfs"
 	"github.com/AngerLab/gotrackfs/internal/track"
 
 	"github.com/cespare/xxhash/v2"
@@ -39,6 +40,11 @@ type Options struct {
 	Logger     *slog.Logger              // Optional structured logger. If nil, a default text logger is used.
 	Slicer     *cutter.TrackCacheManager // Optional audio slicer. If nil, virtual track playback is disabled (Open returns ENOSYS).
 
+	// FS backs all real-filesystem access (stat, listing). If nil, the
+	// production filesystem is used (real disk with NFC/NFD fallback).
+	// Tests inject hostfs.NewMem() to run the whole VFS layer without disk.
+	FS hostfs.FS
+
 	// MaxQuality optionally caps the output format of sliced tracks.
 	// Sources strictly above the cap in bit depth or sample rate are lowered
 	// to it; sources at or below the cap keep their original format.
@@ -50,6 +56,9 @@ type Options struct {
 func (o *Options) EnsureDefaults() {
 	if o.Logger == nil {
 		o.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	}
+	if o.FS == nil {
+		o.FS = defaultFS
 	}
 	if abs, err := filepath.Abs(o.SourceRoot); err == nil {
 		o.SourceRoot = abs
@@ -67,6 +76,7 @@ type VFS struct {
 	sourceRoot string
 	keepAlbum  bool
 	logger     *slog.Logger
+	fs         hostfs.FS
 	cache      *AlbumCache
 	slicer     *cutter.TrackCacheManager
 	ctx        context.Context
@@ -82,12 +92,13 @@ func New(opts Options) *VFS {
 	opts.EnsureDefaults()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cache := NewAlbumCache(opts.Logger)
+	cache := NewAlbumCache(opts.Logger, opts.FS)
 	cache.maxQuality = opts.MaxQuality
 	return &VFS{
 		sourceRoot: opts.SourceRoot,
 		keepAlbum:  opts.KeepAlbum,
 		logger:     opts.Logger,
+		fs:         opts.FS,
 		cache:      cache,
 		slicer:     opts.Slicer,
 		ctx:        ctx,
@@ -332,7 +343,7 @@ func (v *VFS) Readdir(path string, fill func(name string, stat *fuse.Stat_t, ofs
 	}
 
 	realDir := filepath.Join(v.sourceRoot, cleanPath)
-	entries, err := readDir(realDir)
+	entries, err := v.fs.List(realDir)
 	if err != nil {
 		return -fuse.ENOENT
 	}

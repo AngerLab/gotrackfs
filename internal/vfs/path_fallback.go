@@ -6,8 +6,15 @@ import (
 	"os"
 	"syscall"
 
+	"github.com/AngerLab/gotrackfs/internal/hostfs"
+
 	"golang.org/x/text/unicode/norm"
 )
+
+// defaultFS is the production filesystem: the real disk wrapped with the
+// transparent NFC/NFD fallback. All real-disk access goes through it (or
+// through an FS injected via Options.FS) instead of calling os.* directly.
+var defaultFS = hostfs.WithNFDFallback(hostfs.Default())
 
 // probeWithNormFallback runs probe on path and, when it fails with
 // ErrNotExist, transparently retries the NFD and NFC normalized forms.
@@ -45,14 +52,4 @@ func lstatSyscall(path string, st *syscall.Stat_t) error {
 // openRealFile opens an existing real file with transparent NFC/NFD fallback on ErrNotExist.
 func openRealFile(path string) (*os.File, error) {
 	return probeWithNormFallback(path, os.Open)
-}
-
-// statPath performs os.Stat with transparent NFC/NFD fallback on ErrNotExist.
-func statPath(path string) (os.FileInfo, error) {
-	return probeWithNormFallback(path, os.Stat)
-}
-
-// readDir reads directory entries with transparent NFC/NFD fallback on ErrNotExist.
-func readDir(dir string) ([]os.DirEntry, error) {
-	return probeWithNormFallback(dir, os.ReadDir)
 }

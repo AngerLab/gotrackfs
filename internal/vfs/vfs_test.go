@@ -352,7 +352,7 @@ func TestAlbumCache_DirMtimeAvoidsReaddir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cache := NewAlbumCache(nil)
+	cache := NewAlbumCache(nil, nil)
 
 	// Call 1 on empty dir
 	state1, err := cache.GetDirState(emptyDir)
@@ -1110,7 +1110,7 @@ FILE "stampede.flac" WAVE
 		t.Fatal(err)
 	}
 
-	cache := NewAlbumCache(nil)
+	cache := NewAlbumCache(nil, nil)
 
 	const concurrentWorkers = 50
 	var wg sync.WaitGroup

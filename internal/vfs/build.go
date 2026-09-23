@@ -11,6 +11,7 @@ import (
 
 	"github.com/AngerLab/gotrackfs/internal/audio"
 	"github.com/AngerLab/gotrackfs/internal/cue"
+	"github.com/AngerLab/gotrackfs/internal/hostfs"
 	"github.com/AngerLab/gotrackfs/internal/track"
 
 	"golang.org/x/text/unicode/norm"
@@ -41,12 +42,12 @@ type dirFacts struct {
 // buildDirState discovers CUE and audio files in dirPath, parses them,
 // and computes the DirState along with dirFacts for caching.
 // maxQuality optionally caps the sliced-track output format (zero = keep source).
-func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger, maxQuality track.Quality) (*DirState, *dirFacts, error) {
+func buildDirState(fs hostfs.FS, dirPath string, dirFi os.FileInfo, logger *slog.Logger, maxQuality track.Quality) (*DirState, *dirFacts, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
 
-	cueFiles, err := findAllCueFiles(dirPath)
+	cueFiles, err := findAllCueFiles(fs, dirPath)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -56,7 +57,7 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger, maxQu
 		return nil, facts, nil
 	}
 
-	albums := collectAlbums(dirPath, cueFiles, logger, maxQuality)
+	albums := collectAlbums(fs, dirPath, cueFiles, logger, maxQuality)
 	if len(albums) == 0 {
 		return nil, facts, nil
 	}
@@ -79,11 +80,11 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger, maxQu
 // collectAlbums parses every non-skipped CUE sheet in cueFiles into an Album.
 // Claimed plaintext audio files are tracked so two CUE sheets never resolve
 // to the same source file.
-func collectAlbums(dirPath string, cueFiles []string, logger *slog.Logger, maxQuality track.Quality) []*Album {
+func collectAlbums(fs hostfs.FS, dirPath string, cueFiles []string, logger *slog.Logger, maxQuality track.Quality) []*Album {
 	var albums []*Album
 	claimedAudios := make(map[string]bool)
 	for _, cuePath := range cueFiles {
-		album, skip := buildAlbumFromCue(dirPath, cuePath, claimedAudios, logger, maxQuality)
+		album, skip := buildAlbumFromCue(fs, dirPath, cuePath, claimedAudios, logger, maxQuality)
 		if skip {
 			continue
 		}
@@ -97,7 +98,7 @@ func collectAlbums(dirPath string, cueFiles []string, logger *slog.Logger, maxQu
 
 // buildAlbumFromCue parses one CUE sheet and materializes its virtual tracks.
 // skip is true when the sheet must be ignored (unparseable, empty, or already split).
-func buildAlbumFromCue(dirPath, cuePath string, claimedAudios map[string]bool, logger *slog.Logger, maxQuality track.Quality) (*Album, bool) {
+func buildAlbumFromCue(fs hostfs.FS, dirPath, cuePath string, claimedAudios map[string]bool, logger *slog.Logger, maxQuality track.Quality) (*Album, bool) {
 	sheet, err := cue.ParseFile(cuePath)
 	if err != nil {
 		logger.Warn("vfs: skipping invalid cue file", "path", cuePath, "error", err)
@@ -124,7 +125,7 @@ func buildAlbumFromCue(dirPath, cuePath string, claimedAudios map[string]bool, l
 		if len(f.Tracks) == 0 {
 			continue
 		}
-		tracks, sourcePath, ok := virtualTracksForFile(dirPath, cuePath, sheet, f, claimedAudios, sourcePaths, logger, maxQuality)
+		tracks, sourcePath, ok := virtualTracksForFile(fs, dirPath, cuePath, sheet, f, claimedAudios, sourcePaths, logger, maxQuality)
 		if !ok {
 			return nil, true
 		}
@@ -143,7 +144,7 @@ func buildAlbumFromCue(dirPath, cuePath string, claimedAudios map[string]bool, l
 // virtualTracksForFile resolves the audio file declared by one FILE entry of a
 // CUE sheet and builds the virtual tracks it contributes. ok is false when the
 // source audio cannot be resolved or stat'ed (in which case the whole cue is skipped).
-func virtualTracksForFile(dirPath, cuePath string, sheet *cue.Sheet, f *cue.File, claimedAudios map[string]bool, cueSourcePaths []string, logger *slog.Logger, maxQuality track.Quality) (tracks []VirtualTrack, sourcePath string, ok bool) {
+func virtualTracksForFile(fs hostfs.FS, dirPath, cuePath string, sheet *cue.Sheet, f *cue.File, claimedAudios map[string]bool, cueSourcePaths []string, logger *slog.Logger, maxQuality track.Quality) (tracks []VirtualTrack, sourcePath string, ok bool) {
 	alreadyClaimed := make(map[string]bool, len(claimedAudios)+len(cueSourcePaths))
 	for k, v := range claimedAudios {
 		alreadyClaimed[k] = v
@@ -152,12 +153,12 @@ func virtualTracksForFile(dirPath, cuePath string, sheet *cue.Sheet, f *cue.File
 		alreadyClaimed[p] = true
 	}
 
-	audioPath := resolveAudioFileForCue(dirPath, cuePath, f.Name, alreadyClaimed)
+	audioPath := resolveAudioFileForCue(fs, dirPath, cuePath, f.Name, alreadyClaimed)
 	if audioPath == "" {
 		logger.Warn("vfs: audio file not found for cue", "cue", cuePath, "declared", f.Name)
 		return nil, "", false
 	}
-	audioFi, err := os.Stat(audioPath)
+	audioFi, err := fs.Stat(audioPath)
 	if err != nil {
 		logger.Warn("vfs: cannot stat audio file for cue", "cue", cuePath, "audio", audioPath, "error", err)
 		return nil, "", false

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/AngerLab/gotrackfs/internal/audio"
+	"github.com/AngerLab/gotrackfs/internal/hostfs"
 	"github.com/AngerLab/gotrackfs/internal/testutil"
 	"github.com/AngerLab/gotrackfs/internal/track"
 )
@@ -23,7 +24,7 @@ func TestBuildDirState_Pure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	state, facts, err := buildDirState(tmpDir, dirFi, nil, track.Quality{})
+	state, facts, err := buildDirState(hostfs.Default(), tmpDir, dirFi, nil, track.Quality{})
 	if err != nil {
 		t.Fatalf("unexpected error on empty dir: %v", err)
 	}
@@ -57,7 +58,7 @@ FILE "audio.flac" WAVE
 		t.Fatal(err)
 	}
 
-	state, facts, err = buildDirState(tmpDir, dirFi, nil, track.Quality{})
+	state, facts, err = buildDirState(hostfs.Default(), tmpDir, dirFi, nil, track.Quality{})
 	if err != nil {
 		t.Fatalf("unexpected error building state: %v", err)
 	}
@@ -108,7 +109,7 @@ FILE "audio.flac" WAVE
 		t.Fatal(err)
 	}
 
-	state, _, err := buildDirState(tmpDir, dirFi, nil, track.Quality{})
+	state, _, err := buildDirState(hostfs.Default(), tmpDir, dirFi, nil, track.Quality{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +169,7 @@ FILE "nonexistent.flac" WAVE
 		t.Fatal(err)
 	}
 
-	state, _, err := buildDirState(tmpDir, dirFi, logger, track.Quality{})
+	state, _, err := buildDirState(hostfs.Default(), tmpDir, dirFi, logger, track.Quality{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -236,7 +237,7 @@ FILE "audio.flac" WAVE
 			if err != nil {
 				t.Fatal(err)
 			}
-			state, _, err := buildDirState(tmpDir, dirFi, nil, tt.cap)
+			state, _, err := buildDirState(hostfs.Default(), tmpDir, dirFi, nil, tt.cap)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -282,7 +283,7 @@ FILE "audio.flac" WAVE
 	}
 
 	// 1. Without cap
-	stateNoCap, _, err := buildDirState(tmpDir, dirFi, nil, track.Quality{})
+	stateNoCap, _, err := buildDirState(hostfs.Default(), tmpDir, dirFi, nil, track.Quality{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +291,7 @@ FILE "audio.flac" WAVE
 
 	// 2. With 16-bit / 44.1kHz cap
 	cap16_44 := track.Quality{Bits: 16, SampleRate: 44100}
-	stateCap, _, err := buildDirState(tmpDir, dirFi, nil, cap16_44)
+	stateCap, _, err := buildDirState(hostfs.Default(), tmpDir, dirFi, nil, cap16_44)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +360,7 @@ FILE "audio` + ext + `" WAVE
 				t.Fatal(err)
 			}
 
-			state, _, err := buildDirState(tmpDir, dirFi, nil, track.Quality{})
+			state, _, err := buildDirState(hostfs.Default(), tmpDir, dirFi, nil, track.Quality{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -409,7 +410,7 @@ FILE "side_b.flac" FLAC
 		t.Fatal(err)
 	}
 
-	state, facts, err := buildDirState(tmpDir, dirFi, nil, track.Quality{})
+	state, facts, err := buildDirState(hostfs.Default(), tmpDir, dirFi, nil, track.Quality{})
 	if err != nil {
 		t.Fatalf("unexpected error building state: %v", err)
 	}
@@ -488,7 +489,7 @@ FILE "track02.flac" WAVE
 		t.Fatal(err)
 	}
 
-	state, facts, err := buildDirState(tmpDir, dirFi, nil, track.Quality{})
+	state, facts, err := buildDirState(hostfs.Default(), tmpDir, dirFi, nil, track.Quality{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -547,7 +548,7 @@ FILE "side_a.flac" FLAC
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	state, _, err := buildDirState(tmpDir, dirFi, logger, track.Quality{})
+	state, _, err := buildDirState(hostfs.Default(), tmpDir, dirFi, logger, track.Quality{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -616,7 +617,7 @@ FILE "side_b.flac" FLAC
 
 	// Cap to 44.1kHz / 16-bit
 	cap16_44 := track.Quality{Bits: 16, SampleRate: 44100}
-	state, _, err := buildDirState(tmpDir, dirFi, nil, cap16_44)
+	state, _, err := buildDirState(hostfs.Default(), tmpDir, dirFi, nil, cap16_44)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

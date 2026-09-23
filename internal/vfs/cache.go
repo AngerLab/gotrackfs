@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/AngerLab/gotrackfs/internal/hostfs"
 	"github.com/AngerLab/gotrackfs/internal/track"
 
 	"golang.org/x/sync/singleflight"
@@ -16,6 +17,7 @@ type AlbumCache struct {
 	dirs   map[string]*cachedDir
 	sfg    singleflight.Group
 	logger *slog.Logger
+	fs     hostfs.FS
 
 	// maxQuality caps the output format of sliced tracks (zero = keep source).
 	// Set once at mount time via vfs.New before any lookup.
@@ -28,13 +30,19 @@ type cachedDir struct {
 }
 
 // NewAlbumCache creates a new empty AlbumCache with structured logging.
-func NewAlbumCache(logger *slog.Logger) *AlbumCache {
+// A nil fs falls back to the production filesystem (real disk + NFC/NFD
+// fallback).
+func NewAlbumCache(logger *slog.Logger, fs hostfs.FS) *AlbumCache {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if fs == nil {
+		fs = defaultFS
 	}
 	return &AlbumCache{
 		dirs:   make(map[string]*cachedDir),
 		logger: logger,
+		fs:     fs,
 	}
 }
 
@@ -44,7 +52,7 @@ func NewAlbumCache(logger *slog.Logger) *AlbumCache {
 func (c *AlbumCache) GetDirState(dirPath string) (*DirState, error) {
 	dirPath = norm.NFC.String(dirPath)
 
-	dirFi, err := statPath(dirPath)
+	dirFi, err := c.fs.Stat(dirPath)
 	if err != nil {
 		return nil, err
 	}
@@ -68,7 +76,7 @@ func (c *AlbumCache) GetDirState(dirPath string) (*DirState, error) {
 			return cached.state, nil
 		}
 
-		state, facts, err := buildDirState(dirPath, dirFi, c.logger, c.maxQuality)
+		state, facts, err := buildDirState(c.fs, dirPath, dirFi, c.logger, c.maxQuality)
 		if err != nil {
 			return nil, err
 		}

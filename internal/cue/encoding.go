@@ -101,13 +101,7 @@ func DetectEncoding(sample []byte) string {
 		}
 	}
 
-	if latinScore > cyrillicScore && latinScore > 0 {
-		return "windows-1252"
-	}
-	if cyrillicName != "" {
-		return cyrillicName
-	}
-	return "windows-1251"
+	return cyrillicName
 }
 
 // scoreCyrillicHypothesis discriminates between Windows-1251 and KOI8-R.

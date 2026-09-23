@@ -46,6 +46,27 @@ func parseCommandBytes(line []byte) (cmd string, params [][]byte, err error) {
 	var quoteChar byte = 0
 	var buf bytes.Buffer
 
+	handleEscape := func(b byte) {
+		if i+1 < l {
+			next := line[i+1]
+			switch next {
+			case '"', '\'', '\\':
+				buf.WriteByte(next)
+				i++
+			case 'n':
+				buf.WriteByte('\n')
+				i++
+			case 't':
+				buf.WriteByte('\t')
+				i++
+			default:
+				buf.WriteByte(b)
+			}
+		} else {
+			buf.WriteByte(b)
+		}
+	}
+
 	for ; i < l; i++ {
 		b := line[i]
 
@@ -62,24 +83,7 @@ func parseCommandBytes(line []byte) (cmd string, params [][]byte, err error) {
 					buf.Reset()
 				}
 			} else if b == '\\' {
-				if i+1 < l {
-					next := line[i+1]
-					switch next {
-					case '"', '\'', '\\':
-						buf.WriteByte(next)
-						i++
-					case 'n':
-						buf.WriteByte('\n')
-						i++
-					case 't':
-						buf.WriteByte('\t')
-						i++
-					default:
-						buf.WriteByte(b)
-					}
-				} else {
-					buf.WriteByte(b)
-				}
+				handleEscape(b)
 			} else {
 				buf.WriteByte(b)
 			}
@@ -89,24 +93,7 @@ func parseCommandBytes(line []byte) (cmd string, params [][]byte, err error) {
 				params = append(params, bytes.Clone(buf.Bytes()))
 				buf.Reset()
 			} else if b == '\\' {
-				if i+1 < l {
-					next := line[i+1]
-					switch next {
-					case '"', '\'', '\\':
-						buf.WriteByte(next)
-						i++
-					case 'n':
-						buf.WriteByte('\n')
-						i++
-					case 't':
-						buf.WriteByte('\t')
-						i++
-					default:
-						buf.WriteByte(b)
-					}
-				} else {
-					buf.WriteByte(b)
-				}
+				handleEscape(b)
 			} else {
 				buf.WriteByte(b)
 			}

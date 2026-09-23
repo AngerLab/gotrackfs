@@ -65,8 +65,8 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger, maxQu
 			continue
 		}
 
-		tracks := sheet.AllTracks()
-		if len(tracks) == 0 {
+		totalTracks := sheet.TotalTracks()
+		if totalTracks == 0 {
 			logger.Warn("vfs: skipping cue file with no tracks", "path", cuePath)
 			continue
 		}
@@ -76,7 +76,7 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger, maxQu
 			logger.Debug("vfs: skipping multi-file cue (already split per track)",
 				"path", cuePath,
 				"files", len(sheet.Files),
-				"tracks", len(tracks))
+				"tracks", totalTracks)
 			continue
 		}
 

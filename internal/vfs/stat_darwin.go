@@ -33,6 +33,6 @@ func fillStatfs(dst *fuse.Statfs_t, src *syscall.Statfs_t) {
 	dst.Bavail = uint64(src.Bavail)
 	dst.Files = uint64(src.Files)
 	dst.Ffree = uint64(src.Ffree)
-	dst.Favail = uint64(src.Bavail)
+	dst.Favail = uint64(src.Ffree)
 	dst.Namemax = 255
 }

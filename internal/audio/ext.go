@@ -3,10 +3,15 @@ package audio
 import "strings"
 
 // AudioExtensions is the canonical list of audio container extensions the
-// resolver and the prober agree on (lowercase; matching is case-insensitive).
-// It is the single source of truth: resolveAudioFileForCue and Probe both
-// derive their behaviour from it instead of maintaining divergent copies.
-var AudioExtensions = []string{".flac", ".wav", ".ape", ".wv", ".m4a", ".mp3"}
+// resolver and the prober agree on. It is the single source of truth:
+// resolveAudioFileForCue and Probe both derive their behaviour from it
+// instead of maintaining divergent copies.
+//
+// Order matters: the resolver probes candidates in this exact sequence, and
+// historically it tried lowercase stems first and only then uppercase
+// .FLAC/.WAV (matched case-insensitively everywhere else). Keep that order to
+// preserve resolution priority.
+var AudioExtensions = []string{".flac", ".wav", ".ape", ".wv", ".m4a", ".mp3", ".FLAC", ".WAV"}
 
 // IsAudioExt reports whether ext (e.g. ".Flac") is a recognized audio extension.
 func IsAudioExt(ext string) bool {

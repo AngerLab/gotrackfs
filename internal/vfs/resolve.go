@@ -22,16 +22,13 @@ func findAllCueFiles(dir string) ([]string, error) {
 	return cueFiles, nil
 }
 
-// resolveAudioByStem searches dir for a file named stem + <audio extension>.
-// Both lower- and upper-case extensions are tried so byte-exact filesystems
-// find e.g. "Album.FLAC" as well as "Album.flac".
+// resolveAudioByStem searches dir for a file named stem + <audio extension>,
+// probing in AudioExtensions order (lowercase stems first, then .FLAC/.WAV).
 func resolveAudioByStem(dir, stem string, claimed map[string]bool) string {
 	for _, ext := range audio.AudioExtensions {
-		for _, cand := range []string{stem + ext, stem + strings.ToUpper(ext)} {
-			p := filepath.Join(dir, cand)
-			if fi, err := statPath(p); err == nil && !fi.IsDir() && !claimed[p] {
-				return p
-			}
+		p := filepath.Join(dir, stem+ext)
+		if fi, err := statPath(p); err == nil && !fi.IsDir() && !claimed[p] {
+			return p
 		}
 	}
 	return ""

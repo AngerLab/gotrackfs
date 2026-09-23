@@ -3,11 +3,13 @@ package vfs
 import (
 	"bytes"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/AngerLab/gotrackfs/internal/audio"
 	"github.com/AngerLab/gotrackfs/internal/testutil"
 	"github.com/AngerLab/gotrackfs/internal/track"
 )
@@ -301,6 +303,36 @@ FILE "audio.flac" WAVE
 	if ratio < expectedRatio*0.95 || ratio > expectedRatio*1.05 {
 		t.Errorf("estimated size ratio = %f, expected ~%f (noCap=%d, cap=%d)",
 			ratio, expectedRatio, estNoCap, estCap)
+	}
+}
+
+func TestAudioQualityPlan_WavRatioWithoutCap(t *testing.T) {
+	srcFmt := audio.Format{SampleRate: 96000, Bits: 24}
+
+	// Without a quality cap the targets stay zero, but the WAV->FLAC size
+	// ratio must still apply (EstimatedSize drives Getattr before any cut).
+	targetRate, targetBits, wavRatio := audioQualityPlan(track.Quality{}, srcFmt, nil, filepath.FromSlash("/tmp/x.wav"), nil)
+	if targetRate != 0 || targetBits != 0 {
+		t.Errorf("no cap: targets = (%d, %d), want (0, 0)", targetRate, targetBits)
+	}
+	if math.Abs(wavRatio-wavToFlacSizeRatio) > 0.001 {
+		t.Errorf("no cap WAV: ratio = %f, want %f", wavRatio, wavToFlacSizeRatio)
+	}
+
+	_, _, flacRatio := audioQualityPlan(track.Quality{}, srcFmt, nil, filepath.FromSlash("/tmp/x.flac"), nil)
+	if flacRatio != 1.0 {
+		t.Errorf("no cap FLAC: ratio = %f, want 1.0", flacRatio)
+	}
+
+	// With a cap the WAV factor composes with the quality downscale.
+	capQ := track.Quality{Bits: 16, SampleRate: 44100}
+	targetRate, targetBits, cappedRatio := audioQualityPlan(capQ, srcFmt, nil, filepath.FromSlash("/tmp/x.wav"), slog.Default())
+	if targetRate != 44100 || targetBits != 16 {
+		t.Errorf("cap: targets = (%d, %d), want (44100, 16)", targetRate, targetBits)
+	}
+	want := wavToFlacSizeRatio * (44100.0 / 96000.0) * (16.0 / 24.0)
+	if math.Abs(cappedRatio-want) > 0.001 {
+		t.Errorf("cap WAV: ratio = %f, want %f", cappedRatio, want)
 	}
 }
 

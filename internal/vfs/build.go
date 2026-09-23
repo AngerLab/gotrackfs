@@ -201,16 +201,16 @@ func virtualTracksForFile(dirPath, cuePath string, sheet *cue.Sheet, f *cue.File
 
 // audioQualityPlan returns the (possibly lowered) target sample rate and bit
 // depth for a source format, plus the size ratio the cut track will have
-// relative to the source bytes. Unset caps or failed probes yield zero targets
-// and ratio 1.0 (WAV sources are always compressed to FLAC, hence 0.60).
+// relative to the source bytes. Unset caps or failed probes yield zero
+// targets; the ratio still accounts for WAV sources always being compressed
+// to FLAC (~0.60).
 func audioQualityPlan(maxQuality track.Quality, srcFmt audio.Format, probeErr error, audioPath string, logger *slog.Logger) (targetRate, targetBits int, qualityRatio float64) {
 	qualityRatio = 1.0
-	if maxQuality.Unset() || probeErr != nil {
-		return 0, 0, qualityRatio
-	}
-	targetRate, targetBits = maxQuality.Plan(srcFmt.SampleRate, srcFmt.Bits)
-	if targetRate == 0 && targetBits == 0 {
-		logger.Debug("vfs: source already at or below quality cap", "audio", audioPath, "cap", maxQuality.String())
+	if !maxQuality.Unset() && probeErr == nil {
+		targetRate, targetBits = maxQuality.Plan(srcFmt.SampleRate, srcFmt.Bits)
+		if targetRate == 0 && targetBits == 0 {
+			logger.Debug("vfs: source already at or below quality cap", "audio", audioPath, "cap", maxQuality.String())
+		}
 	}
 	if srcFmt.SampleRate > 0 && targetRate > 0 {
 		qualityRatio *= float64(targetRate) / float64(srcFmt.SampleRate)
@@ -387,7 +387,7 @@ func assignArtwork(albums []*Album, artworkPath string) {
 func attachAlbumSubdirs(dirState *DirState, albums []*Album, realNames map[string]bool, artwork map[string]string, dirPath string, logger *slog.Logger) {
 	for albumIdx, album := range albums {
 		subName := norm.NFC.String(determineDiscDirName(album, albumIdx+1))
-		candSubName, collided := uniqueName(subName, func(c string) bool {
+		candSubName, collided := uniqueNamePlain(subName, func(c string) bool {
 			_, existsSub := dirState.Subdirs[c]
 			return existsSub || realNames[c]
 		})

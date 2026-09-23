@@ -15,7 +15,7 @@ import (
 // Options holds configuration for TrackCacheManager.
 type Options struct {
 	Cutter Cutter
-	TTL    time.Duration // Time-to-live after refCount reaches 0. Library default: 60s (CLI default: 5m)
+	TTL    time.Duration // Time-to-live after the last user releases the track. Library default: 60s (CLI default: 5m)
 	Logger *slog.Logger
 }
 
@@ -30,13 +30,12 @@ func (o *Options) EnsureDefaults() {
 }
 
 type trackEntry struct {
-	path          string
-	done          chan struct{}
-	err           error
-	activeWaiters int
-	refCount      int
-	timer         *time.Timer
-	cancelCut     context.CancelFunc
+	path      string
+	done      chan struct{}
+	err       error
+	users     int // active consumers: waiting on the cut or holding an open file
+	timer     *time.Timer
+	cancelCut context.CancelFunc
 }
 
 // TrackCacheManager manages cached slices of monolithic audio tracks with reference counting and TTL cleanup.
@@ -134,10 +133,10 @@ func (m *TrackCacheManager) getOrCreateEntry(key string, req track.Slice) (*trac
 		outputPath := filepath.Join(m.tempDir, fmt.Sprintf("%s.flac", key))
 		cutCtx, cutCancel := context.WithCancel(context.Background())
 		entry = &trackEntry{
-			path:          outputPath,
-			done:          make(chan struct{}),
-			activeWaiters: 1,
-			cancelCut:     cutCancel,
+			path:      outputPath,
+			done:      make(chan struct{}),
+			users:     1,
+			cancelCut: cutCancel,
 		}
 		m.entries[key] = entry
 		go m.runCut(cutCtx, key, req, entry, outputPath)
@@ -154,10 +153,10 @@ func (m *TrackCacheManager) getOrCreateEntry(key string, req track.Slice) (*trac
 		if entry.err != nil {
 			return nil, false, entry.err
 		}
-		entry.refCount++
+		entry.users++
 		return entry, true, nil
 	default:
-		entry.activeWaiters++
+		entry.users++
 		return entry, false, nil
 	}
 }
@@ -172,7 +171,7 @@ func (m *TrackCacheManager) runCut(ctx context.Context, key string, req track.Sl
 	if err != nil {
 		delete(m.entries, key)
 		_ = os.Remove(outputPath)
-	} else if entry.refCount == 0 && entry.activeWaiters <= 0 {
+	} else if entry.users <= 0 {
 		m.scheduleTTLTimerLocked(key, entry)
 	}
 	close(entry.done)
@@ -184,15 +183,14 @@ func (m *TrackCacheManager) waitForEntry(ctx context.Context, key string, entry 
 		m.mu.Lock()
 		defer m.mu.Unlock()
 
-		entry.activeWaiters--
 		if entry.err != nil {
+			entry.users--
 			return "", entry.err
 		}
 		if entry.timer != nil {
 			entry.timer.Stop()
 			entry.timer = nil
 		}
-		entry.refCount++
 		return entry.path, nil
 
 	case <-ctx.Done():
@@ -205,15 +203,15 @@ func (m *TrackCacheManager) waitForEntry(ctx context.Context, key string, entry 
 }
 
 func (m *TrackCacheManager) cancelWaiterLocked(key string, entry *trackEntry) {
-	entry.activeWaiters--
-	if entry.activeWaiters <= 0 {
+	entry.users--
+	if entry.users <= 0 {
 		if entry.cancelCut != nil {
 			entry.cancelCut()
 			entry.cancelCut = nil
 		}
 		select {
 		case <-entry.done:
-			if entry.err == nil && entry.refCount == 0 {
+			if entry.err == nil {
 				m.scheduleTTLTimerLocked(key, entry)
 			}
 		default:
@@ -229,7 +227,7 @@ func (m *TrackCacheManager) scheduleTTLTimerLocked(key string, entry *trackEntry
 		m.mu.Lock()
 		defer m.mu.Unlock()
 
-		if e, stillExists := m.entries[key]; stillExists && e == entry && e.refCount == 0 {
+		if e, stillExists := m.entries[key]; stillExists && e == entry && e.users <= 0 {
 			delete(m.entries, key)
 			_ = os.Remove(e.path)
 			m.logger.Debug("cutter: removed expired cached track", "key", key, "path", e.path)
@@ -237,7 +235,7 @@ func (m *TrackCacheManager) scheduleTTLTimerLocked(key string, entry *trackEntry
 	})
 }
 
-// Release decrements the reference count for a track key. When the count drops to 0,
+// Release decrements the user count for a track key. When it drops to 0,
 // a TTL timer is started to clean up the temporary file.
 func (m *TrackCacheManager) Release(key string) {
 	m.mu.Lock()
@@ -248,9 +246,9 @@ func (m *TrackCacheManager) Release(key string) {
 		return
 	}
 
-	entry.refCount--
-	if entry.refCount <= 0 {
-		entry.refCount = 0
+	entry.users--
+	if entry.users <= 0 {
+		entry.users = 0
 		m.scheduleTTLTimerLocked(key, entry)
 	}
 }

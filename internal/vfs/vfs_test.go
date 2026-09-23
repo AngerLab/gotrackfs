@@ -3,7 +3,6 @@ package vfs
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/AngerLab/gotrackfs/internal/cutter"
+	"github.com/AngerLab/gotrackfs/internal/testutil"
 	"github.com/AngerLab/gotrackfs/internal/track"
 
 	"github.com/winfsp/cgofuse/fuse"
@@ -1255,14 +1255,7 @@ FILE "album.flac" WAVE
 	}
 
 	// Create valid synthetic FLAC (60 seconds = 2646000 samples at 44.1kHz, 16-bit, stereo)
-	var flacBuf bytes.Buffer
-	flacBuf.WriteString("fLaC")
-	flacBuf.Write([]byte{0x80, 0x00, 0x00, 34})
-	var streaminfo [34]byte
-	v := uint64(44100)<<44 | uint64(1)<<41 | uint64(15)<<36 | uint64(2646000)
-	binary.BigEndian.PutUint64(streaminfo[10:18], v)
-	flacBuf.Write(streaminfo[:])
-	if err := os.WriteFile(filepath.Join(albumDir, "album.flac"), flacBuf.Bytes(), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(albumDir, "album.flac"), testutil.FlacHeaderWithSamples(44100, 2, 16, 2646000), 0644); err != nil {
 		t.Fatal(err)
 	}
 

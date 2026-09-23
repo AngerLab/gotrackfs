@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/AngerLab/gotrackfs/internal/testutil"
 )
 
 func TestProbe_RealFLACFile(t *testing.T) {
@@ -33,21 +35,8 @@ func TestProbe_FLACSynthetic(t *testing.T) {
 	tmpDir := t.TempDir()
 	flacPath := filepath.Join(tmpDir, "test.flac")
 
-	// Create valid synthetic FLAC streaminfo
-	// "fLaC" (4 bytes)
-	// block header: isLast=true, type=0, length=34
-	var buf bytes.Buffer
-	buf.WriteString("fLaC")
-	buf.Write([]byte{0x80, 0x00, 0x00, 34}) // isLast=1, type=0, len=34
-
-	var streaminfo [34]byte
 	// 44100 Hz, 2 ch, 16 bits, 441000 samples (10 seconds)
-	v := uint64(44100)<<44 | uint64(1)<<41 | uint64(15)<<36 | uint64(441000)
-	binary.BigEndian.PutUint64(streaminfo[10:18], v)
-
-	buf.Write(streaminfo[:])
-
-	if err := os.WriteFile(flacPath, buf.Bytes(), 0644); err != nil {
+	if err := os.WriteFile(flacPath, testutil.FlacHeaderWithSamples(44100, 2, 16, 441000), 0644); err != nil {
 		t.Fatalf("write synthetic flac: %v", err)
 	}
 
@@ -70,26 +59,7 @@ func TestProbe_WAVSynthetic(t *testing.T) {
 
 	// 44100 Hz, 2 ch, 16 bits -> byteRate = 44100 * 2 * 2 = 176400 bytes/sec
 	// 5 seconds = 882000 bytes
-	var buf bytes.Buffer
-	buf.WriteString("RIFF")
-	binary.Write(&buf, binary.LittleEndian, uint32(36+882000))
-	buf.WriteString("WAVE")
-
-	// fmt chunk
-	buf.WriteString("fmt ")
-	binary.Write(&buf, binary.LittleEndian, uint32(16))
-	binary.Write(&buf, binary.LittleEndian, uint16(1))      // PCM
-	binary.Write(&buf, binary.LittleEndian, uint16(2))      // Channels
-	binary.Write(&buf, binary.LittleEndian, uint32(44100))  // Sample rate
-	binary.Write(&buf, binary.LittleEndian, uint32(176400)) // Byte rate
-	binary.Write(&buf, binary.LittleEndian, uint16(4))      // Block align
-	binary.Write(&buf, binary.LittleEndian, uint16(16))     // Bits per sample
-
-	// data chunk
-	buf.WriteString("data")
-	binary.Write(&buf, binary.LittleEndian, uint32(882000))
-
-	if err := os.WriteFile(wavPath, buf.Bytes(), 0644); err != nil {
+	if err := os.WriteFile(wavPath, testutil.WavHeader(44100, 2, 16, 5.0), 0644); err != nil {
 		t.Fatalf("write synthetic wav: %v", err)
 	}
 
@@ -123,14 +93,7 @@ func TestProbe_FlacSyntheticFormats(t *testing.T) {
 			tmpDir := t.TempDir()
 			flacPath := filepath.Join(tmpDir, "test.flac")
 
-			var buf bytes.Buffer
-			buf.WriteString("fLaC")
-			buf.Write([]byte{0x80, 0x00, 0x00, 34}) // isLast=1, type=0, len=34
-			var streaminfo [34]byte
-			v := tt.rate<<44 | (tt.chans-1)<<41 | (tt.bps-1)<<36 | 1000
-			binary.BigEndian.PutUint64(streaminfo[10:18], v)
-			buf.Write(streaminfo[:])
-			if err := os.WriteFile(flacPath, buf.Bytes(), 0o644); err != nil {
+			if err := os.WriteFile(flacPath, testutil.FlacHeader(tt.rate, tt.chans, tt.bps), 0o644); err != nil {
 				t.Fatal(err)
 			}
 
@@ -160,15 +123,8 @@ func TestProbe_SinglePassFLAC(t *testing.T) {
 	tmpDir := t.TempDir()
 	flacPath := filepath.Join(tmpDir, "test.flac")
 
-	var buf bytes.Buffer
-	buf.WriteString("fLaC")
-	buf.Write([]byte{0x80, 0x00, 0x00, 34})
-	var streaminfo [34]byte
 	// 96000 Hz, 2 ch, 24 bits, 960000 samples (10 seconds)
-	v := uint64(96000)<<44 | uint64(1)<<41 | uint64(23)<<36 | uint64(960000)
-	binary.BigEndian.PutUint64(streaminfo[10:18], v)
-	buf.Write(streaminfo[:])
-	if err := os.WriteFile(flacPath, buf.Bytes(), 0o644); err != nil {
+	if err := os.WriteFile(flacPath, testutil.FlacHeaderWithSamples(96000, 2, 24, 960000), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -522,16 +478,8 @@ func TestProbe_FFprobeRunnerMock(t *testing.T) {
 		}
 
 		// Valid FLAC header with TotalSamples == 0
-		var buf bytes.Buffer
-		buf.WriteString("fLaC")
-		buf.Write([]byte{0x80, 0x00, 0x00, 34}) // isLast=1, type=0, len=34
-		var streaminfo [34]byte
-		v := uint64(44100)<<44 | uint64(1)<<41 | uint64(15)<<36 | 0 // 0 total samples
-		binary.BigEndian.PutUint64(streaminfo[10:18], v)
-		buf.Write(streaminfo[:])
-
 		p := filepath.Join(tmpDir, "stream.flac")
-		if err := os.WriteFile(p, buf.Bytes(), 0644); err != nil {
+		if err := os.WriteFile(p, testutil.FlacHeaderWithSamples(44100, 2, 16, 0), 0644); err != nil {
 			t.Fatal(err)
 		}
 

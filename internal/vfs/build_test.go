@@ -2,13 +2,13 @@ package vfs
 
 import (
 	"bytes"
-	"encoding/binary"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/AngerLab/gotrackfs/internal/testutil"
 	"github.com/AngerLab/gotrackfs/internal/track"
 )
 
@@ -192,15 +192,7 @@ func makeFlacHeader(rate, chans, bps uint64) []byte {
 }
 
 func makeFlacHeaderWithSamples(rate, chans, bps, totalSamples uint64) []byte {
-	var buf bytes.Buffer
-	buf.WriteString("fLaC")
-	buf.Write([]byte{0x80, 0x00, 0x00, 34})
-	var streaminfo [34]byte
-	v := rate<<44 | (chans-1)<<41 | (bps-1)<<36 | (totalSamples & 0xFFFFFFFFF)
-	binary.BigEndian.PutUint64(streaminfo[10:18], v)
-	buf.Write(streaminfo[:])
-	buf.Write(make([]byte, 1024))
-	return buf.Bytes()
+	return testutil.FlacHeaderWithSamples(rate, chans, bps, totalSamples)
 }
 
 func TestBuildDirState_QualityCap(t *testing.T) {
@@ -544,23 +536,7 @@ FILE "side_a.flac" FLAC
 }
 
 func makeWavHeader(rate, chans, bps uint32, durationSec float64) []byte {
-	byteRate := rate * chans * (bps / 8)
-	dataSize := uint32(durationSec * float64(byteRate))
-	buf := new(bytes.Buffer)
-	buf.WriteString("RIFF")
-	binary.Write(buf, binary.LittleEndian, uint32(36+dataSize))
-	buf.WriteString("WAVE")
-	buf.WriteString("fmt ")
-	binary.Write(buf, binary.LittleEndian, uint32(16))
-	binary.Write(buf, binary.LittleEndian, uint16(1)) // PCM
-	binary.Write(buf, binary.LittleEndian, uint16(chans))
-	binary.Write(buf, binary.LittleEndian, rate)
-	binary.Write(buf, binary.LittleEndian, byteRate)
-	binary.Write(buf, binary.LittleEndian, uint16(chans*(bps/8)))
-	binary.Write(buf, binary.LittleEndian, uint16(bps))
-	buf.WriteString("data")
-	binary.Write(buf, binary.LittleEndian, dataSize)
-	return buf.Bytes()
+	return testutil.WavHeader(rate, chans, bps, durationSec)
 }
 
 func TestBuildDirState_MultiFileCue_ProbedDurationAndMixedQuality(t *testing.T) {

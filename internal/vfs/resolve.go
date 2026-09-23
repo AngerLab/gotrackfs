@@ -3,6 +3,8 @@ package vfs
 import (
 	"path/filepath"
 	"strings"
+
+	"github.com/AngerLab/gotrackfs/internal/audio"
 )
 
 // findAllCueFiles returns all .cue files in the specified directory.
@@ -18,6 +20,21 @@ func findAllCueFiles(dir string) ([]string, error) {
 		}
 	}
 	return cueFiles, nil
+}
+
+// resolveAudioByStem searches dir for a file named stem + <audio extension>.
+// Both lower- and upper-case extensions are tried so byte-exact filesystems
+// find e.g. "Album.FLAC" as well as "Album.flac".
+func resolveAudioByStem(dir, stem string, claimed map[string]bool) string {
+	for _, ext := range audio.AudioExtensions {
+		for _, cand := range []string{stem + ext, stem + strings.ToUpper(ext)} {
+			p := filepath.Join(dir, cand)
+			if fi, err := statPath(p); err == nil && !fi.IsDir() && !claimed[p] {
+				return p
+			}
+		}
+	}
+	return ""
 }
 
 // resolveAudioFileForCue resolves the matching monolithic audio file for a CUE sheet.
@@ -36,22 +53,16 @@ func resolveAudioFileForCue(dir, cuePath, declaredName string, claimed map[strin
 
 		// Stem + audio extensions
 		stem := strings.TrimSuffix(filepath.Base(declaredName), filepath.Ext(declaredName))
-		for _, ext := range []string{".flac", ".wav", ".ape", ".wv", ".m4a", ".mp3", ".FLAC", ".WAV"} {
-			cand := filepath.Join(dir, stem+ext)
-			if fi, err := statPath(cand); err == nil && !fi.IsDir() && !claimed[cand] {
-				return cand
-			}
+		if p := resolveAudioByStem(dir, stem, claimed); p != "" {
+			return p
 		}
 	}
 
 	// 2. Same stem as CUE file
 	cueBase := filepath.Base(cuePath)
 	cueStem := strings.TrimSuffix(cueBase, filepath.Ext(cueBase))
-	for _, ext := range []string{".flac", ".wav", ".ape", ".wv", ".m4a", ".mp3", ".FLAC", ".WAV"} {
-		cand := filepath.Join(dir, cueStem+ext)
-		if fi, err := statPath(cand); err == nil && !fi.IsDir() && !claimed[cand] {
-			return cand
-		}
+	if p := resolveAudioByStem(dir, cueStem, claimed); p != "" {
+		return p
 	}
 
 	// 3. If only one unclaimed audio file exists in directory
@@ -62,13 +73,12 @@ func resolveAudioFileForCue(dir, cuePath, declaredName string, claimed map[strin
 			if e.IsDir() {
 				continue
 			}
-			ext := strings.ToLower(filepath.Ext(e.Name()))
-			switch ext {
-			case ".flac", ".wav", ".ape", ".wv", ".m4a", ".mp3":
-				cand := filepath.Join(dir, e.Name())
-				if !claimed[cand] {
-					unclaimed = append(unclaimed, cand)
-				}
+			if !audio.IsAudioExt(filepath.Ext(e.Name())) {
+				continue
+			}
+			cand := filepath.Join(dir, e.Name())
+			if !claimed[cand] {
+				unclaimed = append(unclaimed, cand)
 			}
 		}
 		if len(unclaimed) == 1 {

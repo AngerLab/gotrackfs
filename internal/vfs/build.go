@@ -140,7 +140,7 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger, maxQu
 			if srcFmt.Bits > 0 && targetBits > 0 {
 				qualityRatio *= float64(targetBits) / float64(srcFmt.Bits)
 			}
-			if ext := strings.ToLower(filepath.Ext(audioPath)); ext == ".wav" || ext == ".wave" {
+			if ext := filepath.Ext(audioPath); audio.IsWAVExt(ext) {
 				// WAV is uncompressed PCM; FLAC encodes it down to ~60% of the raw bytes.
 				qualityRatio *= wavToFlacSizeRatio
 			}

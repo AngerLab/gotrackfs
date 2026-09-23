@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"strings"
 )
 
 // ErrNotSupported is returned when the audio format is not supported or duration cannot be determined.
@@ -30,11 +29,11 @@ type Info struct {
 // If the container is not FLAC/WAV, direct header parsing fails, or WAV duration cannot be determined,
 // it falls back to ffprobe. On total failure, it wraps ErrNotSupported with underlying diagnostic causes.
 func Probe(filePath string) (Info, error) {
-	ext := strings.ToLower(filepath.Ext(filePath))
+	ext := filepath.Ext(filePath)
 	var directErr error
 
-	switch ext {
-	case ".flac":
+	switch {
+	case IsFLACExt(ext):
 		flacInfo, err := probeFLACInfo(filePath)
 		if err == nil && flacInfo.Format.SampleRate > 0 && flacInfo.TotalSamples > 0 {
 			dur := float64(flacInfo.TotalSamples) / float64(flacInfo.Format.SampleRate)
@@ -51,7 +50,7 @@ func Probe(filePath string) (Info, error) {
 			directErr = errors.New("flac parser: zero total samples (streaming FLAC)")
 		}
 
-	case ".wav", ".wave":
+	case IsWAVExt(ext):
 		wavInfo, err := probeWAVInfo(filePath)
 		if err == nil && wavInfo.HasFmt && wavInfo.Format.SampleRate > 0 && wavInfo.ByteRate > 0 && wavInfo.DataSize > 0 {
 			dur := float64(wavInfo.DataSize) / float64(wavInfo.ByteRate)

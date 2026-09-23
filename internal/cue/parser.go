@@ -15,32 +15,6 @@ type rawCommand struct {
 	params [][]byte
 }
 
-// textFieldSetters maps commands that set the same-named field on either the
-// current track or the album, depending on whether a TRACK block is open.
-var textFieldSetters = map[string]func(sheet *Sheet, track *Track, val string){
-	"TITLE": func(s *Sheet, t *Track, v string) {
-		if t != nil {
-			t.Title = v
-		} else {
-			s.Title = v
-		}
-	},
-	"PERFORMER": func(s *Sheet, t *Track, v string) {
-		if t != nil {
-			t.Performer = v
-		} else {
-			s.Performer = v
-		}
-	},
-	"SONGWRITER": func(s *Sheet, t *Track, v string) {
-		if t != nil {
-			t.Songwriter = v
-		} else {
-			s.Songwriter = v
-		}
-	},
-}
-
 // ParseFile reads a CUE sheet from disk, performs two-pass parsing and encoding detection.
 func ParseFile(path string) (*Sheet, error) {
 	f, err := os.Open(path)
@@ -59,6 +33,11 @@ func Parse(r io.Reader) (*Sheet, error) {
 		return nil, fmt.Errorf("read cue input: %w", err)
 	}
 	return ParseBytes(rawBytes)
+}
+
+// ParseString wraps string input into ParseBytes.
+func ParseString(text string) (*Sheet, error) {
+	return ParseBytes([]byte(text))
 }
 
 // ParseBytes parses CUE sheet bytes in two passes with automatic encoding detection and BOM/UTF-16 sniffing.
@@ -120,16 +99,37 @@ func parsePreprocessed(data []byte) (*Sheet, error) {
 			params[i] = decode(p)
 		}
 
-		// Title/performer/songwriter share one shape: set on the open track,
-		// else on the sheet.
-		if setter, ok := textFieldSetters[rc.cmd]; ok {
-			if len(params) > 0 {
-				setter(sheet, curTrack, params[0])
-			}
-			continue
-		}
-
 		switch rc.cmd {
+		case "TITLE":
+			if len(params) > 0 {
+				val := params[0]
+				if curTrack != nil {
+					curTrack.Title = val
+				} else {
+					sheet.Title = val
+				}
+			}
+
+		case "PERFORMER":
+			if len(params) > 0 {
+				val := params[0]
+				if curTrack != nil {
+					curTrack.Performer = val
+				} else {
+					sheet.Performer = val
+				}
+			}
+
+		case "SONGWRITER":
+			if len(params) > 0 {
+				val := params[0]
+				if curTrack != nil {
+					curTrack.Songwriter = val
+				} else {
+					sheet.Songwriter = val
+				}
+			}
+
 		case "FILE":
 			if len(params) > 0 {
 				fileType := "WAVE"
@@ -147,6 +147,10 @@ func parsePreprocessed(data []byte) (*Sheet, error) {
 		case "TRACK":
 			if len(params) > 0 {
 				num, _ := strconv.Atoi(params[0])
+				dataType := "AUDIO"
+				if len(params) > 1 {
+					dataType = params[1]
+				}
 
 				if curFile == nil {
 					sheet.Files = append(sheet.Files, File{
@@ -157,7 +161,8 @@ func parsePreprocessed(data []byte) (*Sheet, error) {
 				}
 
 				curFile.Tracks = append(curFile.Tracks, Track{
-					Num: num,
+					Num:      num,
+					DataType: dataType,
 				})
 				curTrack = &curFile.Tracks[len(curFile.Tracks)-1]
 			}
@@ -183,6 +188,26 @@ func parsePreprocessed(data []byte) (*Sheet, error) {
 				if err == nil {
 					curTrack.PreGap = offset
 				}
+			}
+
+		case "CATALOG":
+			if len(params) > 0 {
+				sheet.Catalog = params[0]
+			}
+
+		case "CDTEXTFILE":
+			if len(params) > 0 {
+				sheet.CdTextFile = params[0]
+			}
+
+		case "ISRC":
+			if len(params) > 0 && curTrack != nil {
+				curTrack.Isrc = params[0]
+			}
+
+		case "FLAGS":
+			if curTrack != nil {
+				curTrack.Flags = append(curTrack.Flags, params...)
 			}
 
 		case "REM":
@@ -220,8 +245,14 @@ func parseRem(params []string, sheet *Sheet) {
 		}
 	case "DISCNUMBER":
 		sheet.DiscNumber = val
+	case "TOTALDISCS":
+		sheet.TotalDiscs = val
+	case "CATALOG":
+		if sheet.Catalog == "" {
+			sheet.Catalog = val
+		}
 	default:
-		// Postel's Law: ignore unknown REM lines
+		sheet.Comments = append(sheet.Comments, strings.Join(params, " "))
 	}
 }
 

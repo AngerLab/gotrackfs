@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"syscall"
 
+	"github.com/AngerLab/gotrackfs/internal/cutter"
 	"github.com/AngerLab/gotrackfs/internal/track"
 
 	"github.com/cespare/xxhash/v2"
@@ -31,21 +32,12 @@ func inodeFromPath(cleanPath string) uint64 {
 	return ino
 }
 
-// TrackSlicer defines the interface needed by VFS to slice and acquire tracks on-demand.
-type TrackSlicer interface {
-	Acquire(ctx context.Context, key string, req track.Slice) (string, error)
-	Release(key string)
-	GetExisting(key string) (int64, bool)
-	Close() error
-}
-
 // Options holds configuration options for the VFS filesystem.
 type Options struct {
 	SourceRoot string
-	KeepAlbum  bool         // If true, keep monolithic audio files visible alongside virtual tracks
-	Debug      bool         // If true, enables verbose debug logging
-	Logger     *slog.Logger // Optional structured logger. If nil, a default text logger is used with level based on Debug.
-	Slicer     TrackSlicer  // Optional audio slicer implementation. If nil, virtual track playback is disabled (Open returns ENOSYS).
+	KeepAlbum  bool                      // If true, keep monolithic audio files visible alongside virtual tracks
+	Logger     *slog.Logger              // Optional structured logger. If nil, a default text logger is used.
+	Slicer     *cutter.TrackCacheManager // Optional audio slicer. If nil, virtual track playback is disabled (Open returns ENOSYS).
 
 	// MaxQuality optionally caps the output format of sliced tracks.
 	// Sources strictly above the cap in bit depth or sample rate are lowered
@@ -57,11 +49,7 @@ type Options struct {
 // EnsureDefaults fills in zero-value fields with production-ready defaults.
 func (o *Options) EnsureDefaults() {
 	if o.Logger == nil {
-		level := slog.LevelInfo
-		if o.Debug {
-			level = slog.LevelDebug
-		}
-		o.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+		o.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	}
 	if abs, err := filepath.Abs(o.SourceRoot); err == nil {
 		o.SourceRoot = abs
@@ -80,7 +68,7 @@ type VFS struct {
 	keepAlbum  bool
 	logger     *slog.Logger
 	cache      *AlbumCache
-	slicer     TrackSlicer
+	slicer     *cutter.TrackCacheManager
 	ctx        context.Context
 	cancel     context.CancelFunc
 

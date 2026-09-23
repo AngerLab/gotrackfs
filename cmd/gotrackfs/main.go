@@ -94,8 +94,9 @@ func main() {
 		log.Fatalf("mount point directory does not exist: %s", absMount)
 	}
 
-	// Initialize audio cutter if ffmpeg is available
-	var slicer vfs.TrackSlicer
+	// Initialize audio cutter if ffmpeg is available.
+	// A nil slicer disables virtual track playback (Open returns ENOSYS).
+	var slicer *cutter.TrackCacheManager
 	ffmpegCutter, err := cutter.NewFFmpeg("", logger)
 	if err != nil {
 		logger.Warn("ffmpeg not found in PATH: audio slicing is disabled (install ffmpeg to enable virtual track playback)", "error", err)
@@ -116,7 +117,6 @@ func main() {
 	fs := vfs.New(vfs.Options{
 		SourceRoot: absSource,
 		KeepAlbum:  keepAlbum,
-		Debug:      debug,
 		Logger:     logger,
 		Slicer:     slicer,
 		MaxQuality: maxQuality,

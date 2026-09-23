@@ -61,11 +61,6 @@ func Parse(r io.Reader) (*Sheet, error) {
 	return ParseBytes(rawBytes)
 }
 
-// ParseString wraps string input into ParseBytes.
-func ParseString(text string) (*Sheet, error) {
-	return ParseBytes([]byte(text))
-}
-
 // ParseBytes parses CUE sheet bytes in two passes with automatic encoding detection and BOM/UTF-16 sniffing.
 func ParseBytes(data []byte) (*Sheet, error) {
 	preprocessed, err := SniffAndPreprocess(data)
@@ -152,10 +147,6 @@ func parsePreprocessed(data []byte) (*Sheet, error) {
 		case "TRACK":
 			if len(params) > 0 {
 				num, _ := strconv.Atoi(params[0])
-				dataType := "AUDIO"
-				if len(params) > 1 {
-					dataType = params[1]
-				}
 
 				if curFile == nil {
 					sheet.Files = append(sheet.Files, File{
@@ -166,8 +157,7 @@ func parsePreprocessed(data []byte) (*Sheet, error) {
 				}
 
 				curFile.Tracks = append(curFile.Tracks, Track{
-					Num:      num,
-					DataType: dataType,
+					Num: num,
 				})
 				curTrack = &curFile.Tracks[len(curFile.Tracks)-1]
 			}
@@ -193,26 +183,6 @@ func parsePreprocessed(data []byte) (*Sheet, error) {
 				if err == nil {
 					curTrack.PreGap = offset
 				}
-			}
-
-		case "CATALOG":
-			if len(params) > 0 {
-				sheet.Catalog = params[0]
-			}
-
-		case "CDTEXTFILE":
-			if len(params) > 0 {
-				sheet.CdTextFile = params[0]
-			}
-
-		case "ISRC":
-			if len(params) > 0 && curTrack != nil {
-				curTrack.Isrc = params[0]
-			}
-
-		case "FLAGS":
-			if curTrack != nil {
-				curTrack.Flags = append(curTrack.Flags, params...)
 			}
 
 		case "REM":
@@ -250,14 +220,8 @@ func parseRem(params []string, sheet *Sheet) {
 		}
 	case "DISCNUMBER":
 		sheet.DiscNumber = val
-	case "TOTALDISCS":
-		sheet.TotalDiscs = val
-	case "CATALOG":
-		if sheet.Catalog == "" {
-			sheet.Catalog = val
-		}
 	default:
-		sheet.Comments = append(sheet.Comments, strings.Join(params, " "))
+		// Postel's Law: ignore unknown REM lines
 	}
 }
 

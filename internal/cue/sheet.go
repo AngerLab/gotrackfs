@@ -2,17 +2,13 @@ package cue
 
 // Sheet represents parsed CUE sheet metadata and tracks.
 type Sheet struct {
-	Catalog    string   // Media catalog / barcode number
-	CdTextFile string   // Associated CD-Text file
-	Title      string   // Album title
-	Performer  string   // Album artist
-	Songwriter string   // Album songwriter
-	Date       string   // Release date/year
-	Genre      string   // Music genre
-	DiscNumber string   // Disc number (from REM DISCNUMBER)
-	TotalDiscs string   // Total discs (from REM TOTALDISCS)
-	Comments   []string // Raw comments and unhandled REM lines
-	Files      []File   // Audio files declared in CUE
+	Title      string // Album title
+	Performer  string // Album artist
+	Songwriter string // Album songwriter
+	Date       string // Release date/year
+	Genre      string // Music genre
+	DiscNumber string // Disc number (from REM DISCNUMBER)
+	Files      []File // Audio files declared in CUE
 }
 
 // File represents a FILE entry in a CUE sheet.
@@ -24,17 +20,14 @@ type File struct {
 
 // Track represents a single audio track in a CUE sheet.
 type Track struct {
-	Num        int      // Track number (1-99)
-	DataType   string   // Track data type (typically AUDIO)
-	Title      string   // Track title
-	Performer  string   // Track artist
-	Songwriter string   // Track songwriter
-	Isrc       string   // International Standard Recording Code
-	Flags      []string // Flags (DCP, 4CH, PRE, SCMS)
-	Start      float64  // Start offset in seconds (from INDEX 01)
-	End        float64  // End offset in seconds (next track start or total duration)
-	PreGap     float64  // Pre-gap offset in seconds (from INDEX 00 or PREGAP)
-	HasIndex   bool     // True if a valid INDEX 01 was encountered
+	Num        int     // Track number (1-99)
+	Title      string  // Track title
+	Performer  string  // Track artist
+	Songwriter string  // Track songwriter
+	Start      float64 // Start offset in seconds (from INDEX 01)
+	End        float64 // End offset in seconds (next track start or total duration)
+	PreGap     float64 // Pre-gap offset in seconds (from INDEX 00 or PREGAP)
+	HasIndex   bool    // True if a valid INDEX 01 was encountered
 }
 
 // TotalTracks returns the total number of tracks across all files in the sheet.

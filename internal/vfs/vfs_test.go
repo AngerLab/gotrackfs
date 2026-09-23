@@ -418,14 +418,13 @@ FILE "music.flac" WAVE
 	}
 }
 
-func TestVFS_DebugAndLogger(t *testing.T) {
+func TestVFS_LoggerOrDefault(t *testing.T) {
 	tmpDir := t.TempDir()
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	v := New(Options{
 		SourceRoot: tmpDir,
-		Debug:      true,
 		Logger:     logger,
 	})
 

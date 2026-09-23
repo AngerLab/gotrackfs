@@ -14,10 +14,9 @@ import (
 
 // Options holds configuration for TrackCacheManager.
 type Options struct {
-	Cutter  Cutter
-	TempDir string        // If empty, a subdirectory in os.TempDir() is created at construction time
-	TTL     time.Duration // Time-to-live after refCount reaches 0. Library default: 60s (CLI default: 5m)
-	Logger  *slog.Logger
+	Cutter Cutter
+	TTL    time.Duration // Time-to-live after refCount reaches 0. Library default: 60s (CLI default: 5m)
+	Logger *slog.Logger
 }
 
 // EnsureDefaults fills in zero-value fields with production-ready defaults.
@@ -56,17 +55,9 @@ type TrackCacheManager struct {
 func NewManager(opts Options) (*TrackCacheManager, error) {
 	opts.EnsureDefaults()
 
-	tempDir := opts.TempDir
-	if tempDir == "" {
-		var err error
-		tempDir, err = os.MkdirTemp("", "gotrackfs-*")
-		if err != nil {
-			return nil, fmt.Errorf("create temp dir for cutter: %w", err)
-		}
-	} else {
-		if err := os.MkdirAll(tempDir, 0755); err != nil {
-			return nil, fmt.Errorf("create cutter temp dir %s: %w", tempDir, err)
-		}
+	tempDir, err := os.MkdirTemp("", "gotrackfs-*")
+	if err != nil {
+		return nil, fmt.Errorf("create temp dir for cutter: %w", err)
 	}
 
 	return &TrackCacheManager{

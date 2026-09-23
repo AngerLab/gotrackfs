@@ -55,11 +55,6 @@ func (c *FFmpeg) SetMaxConcurrency(n int) {
 	c.sem = make(chan struct{}, n)
 }
 
-// SetTimeout configures the timeout for ffmpeg cut operations.
-func (c *FFmpeg) SetTimeout(d time.Duration) {
-	c.timeout = d
-}
-
 // BuildArgs constructs the CLI arguments for ffmpeg.
 func (c *FFmpeg) BuildArgs(req track.Slice, outputPath string) []string {
 	var args []string

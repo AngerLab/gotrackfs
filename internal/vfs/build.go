@@ -65,164 +65,194 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger, maxQu
 			continue
 		}
 
-		tracks := sheet.AllTracks()
-		if len(tracks) == 0 {
+		totalTracks := sheet.TotalTracks()
+		if totalTracks == 0 {
 			logger.Warn("vfs: skipping cue file with no tracks", "path", cuePath)
 			continue
 		}
 
-		// Multi-file CUEs (already split per track) are left untouched
-		if len(sheet.Files) > 1 {
-			logger.Debug("vfs: skipping multi-file cue (already split per track)", "path", cuePath)
+		// Multi-file CUEs where every file is already split per track are left untouched
+		if isAlreadySplit(sheet) {
+			logger.Debug("vfs: skipping multi-file cue (already split per track)",
+				"path", cuePath,
+				"files", len(sheet.Files),
+				"tracks", totalTracks)
 			continue
 		}
 
-		declaredFile := ""
-		if len(sheet.Files) == 1 {
-			declaredFile = sheet.Files[0].Name
-		}
+		var (
+			virtualTracks []VirtualTrack
+			sourcePaths   []string
+			skipCue       bool
+		)
 
-		audioPath := resolveAudioFileForCue(dirPath, cuePath, declaredFile, claimedAudios)
-		if audioPath == "" {
-			logger.Warn("vfs: audio file not found for cue", "cue", cuePath, "declared", declaredFile)
-			continue
-		}
-
-		audioFi, err := os.Stat(audioPath)
-		if err != nil {
-			logger.Warn("vfs: cannot stat audio file for cue", "cue", cuePath, "audio", audioPath, "error", err)
-			continue
-		}
-		claimedAudios[audioPath] = true
-
-		audioInfo, probeErr := audio.Probe(audioPath)
-		if probeErr != nil {
-			logger.Debug("vfs: failed to probe audio file", "audio", audioPath, "error", probeErr)
-		}
-		totalAudioDuration := audioInfo.Duration
-
-		// Quality cap: probe the source format once per album and lower cuts
-		// that exceed it. Unset cap leaves every slice in the source format.
-		var targetRate, targetBits int
-		srcFmt := audioInfo.Format
-		if !maxQuality.Unset() && probeErr == nil {
-			targetRate, targetBits = maxQuality.Plan(srcFmt.SampleRate, srcFmt.Bits)
-			if targetRate == 0 && targetBits == 0 {
-				logger.Debug("vfs: source already at or below quality cap", "audio", audioPath, "cap", maxQuality.String())
+		for fi := range sheet.Files {
+			f := &sheet.Files[fi]
+			if len(f.Tracks) == 0 {
+				continue
 			}
-		}
 
-		qualityRatio := 1.0
-		if srcFmt.SampleRate > 0 && targetRate > 0 {
-			qualityRatio *= float64(targetRate) / float64(srcFmt.SampleRate)
-		}
-		if srcFmt.Bits > 0 && targetBits > 0 {
-			qualityRatio *= float64(targetBits) / float64(srcFmt.Bits)
-		}
-		if ext := strings.ToLower(filepath.Ext(audioPath)); ext == ".wav" || ext == ".wave" {
-			// WAV is uncompressed PCM; FLAC encodes it down to ~60% of the raw bytes.
-			qualityRatio *= wavToFlacSizeRatio
-		}
+			declaredFile := f.Name
+			currentClaimed := make(map[string]bool, len(claimedAudios)+len(sourcePaths))
+			for k, v := range claimedAudios {
+				currentClaimed[k] = v
+			}
+			for _, p := range sourcePaths {
+				currentClaimed[p] = true
+			}
 
-		totalAudioSize := audioFi.Size()
-		totalKnownDuration := totalAudioDuration
-		if totalKnownDuration <= 0 {
-			for _, tr := range tracks {
+			audioPath := resolveAudioFileForCue(dirPath, cuePath, declaredFile, currentClaimed)
+			if audioPath == "" {
+				logger.Warn("vfs: audio file not found for cue", "cue", cuePath, "declared", declaredFile)
+				skipCue = true
+				break
+			}
+
+			audioFi, err := os.Stat(audioPath)
+			if err != nil {
+				logger.Warn("vfs: cannot stat audio file for cue", "cue", cuePath, "audio", audioPath, "error", err)
+				skipCue = true
+				break
+			}
+
+			sourcePaths = append(sourcePaths, audioPath)
+
+			audioInfo, probeErr := audio.Probe(audioPath)
+			if probeErr != nil {
+				logger.Debug("vfs: failed to probe audio file", "audio", audioPath, "error", probeErr)
+			}
+			fileAudioDuration := audioInfo.Duration
+
+			// Quality cap: probe the source format per audio file and lower cuts that exceed it.
+			var targetRate, targetBits int
+			srcFmt := audioInfo.Format
+			if !maxQuality.Unset() && probeErr == nil {
+				targetRate, targetBits = maxQuality.Plan(srcFmt.SampleRate, srcFmt.Bits)
+				if targetRate == 0 && targetBits == 0 {
+					logger.Debug("vfs: source already at or below quality cap", "audio", audioPath, "cap", maxQuality.String())
+				}
+			}
+
+			qualityRatio := 1.0
+			if srcFmt.SampleRate > 0 && targetRate > 0 {
+				qualityRatio *= float64(targetRate) / float64(srcFmt.SampleRate)
+			}
+			if srcFmt.Bits > 0 && targetBits > 0 {
+				qualityRatio *= float64(targetBits) / float64(srcFmt.Bits)
+			}
+			if ext := strings.ToLower(filepath.Ext(audioPath)); ext == ".wav" || ext == ".wave" {
+				// WAV is uncompressed PCM; FLAC encodes it down to ~60% of the raw bytes.
+				qualityRatio *= wavToFlacSizeRatio
+			}
+
+			totalAudioSize := audioFi.Size()
+			totalKnownDuration := fileAudioDuration
+			if totalKnownDuration <= 0 {
+				for _, tr := range f.Tracks {
+					if tr.End > tr.Start {
+						totalKnownDuration += (tr.End - tr.Start)
+					}
+				}
+			} else {
+				// If total duration is known, populate the last track's End time if missing
+				if len(f.Tracks) > 0 {
+					lastIdx := len(f.Tracks) - 1
+					if f.Tracks[lastIdx].End <= f.Tracks[lastIdx].Start && fileAudioDuration > f.Tracks[lastIdx].Start {
+						f.Tracks[lastIdx].End = fileAudioDuration
+					}
+				}
+			}
+
+			for _, tr := range f.Tracks {
+				title := tr.Title
+				if title == "" {
+					title = fmt.Sprintf("Track %02d", tr.Num)
+				}
+
+				trackDuration := float64(0)
 				if tr.End > tr.Start {
-					totalKnownDuration += (tr.End - tr.Start)
+					trackDuration = tr.End - tr.Start
+				} else if totalKnownDuration > tr.Start {
+					trackDuration = totalKnownDuration - tr.Start
 				}
-			}
-		} else {
-			// If total duration is known, populate the last track's End time if missing
-			if len(tracks) > 0 {
-				lastIdx := len(tracks) - 1
-				if tracks[lastIdx].End <= tracks[lastIdx].Start && totalAudioDuration > tracks[lastIdx].Start {
-					tracks[lastIdx].End = totalAudioDuration
+
+				estimatedSize := int64(0)
+				if trackDuration > 0 && totalKnownDuration > 0 {
+					estimatedSize = int64(float64(totalAudioSize) * (trackDuration / totalKnownDuration) * qualityRatio * estimationSafetyMargin)
+				} else {
+					estimatedSize = int64(float64(totalAudioSize) / float64(len(f.Tracks)) * qualityRatio * estimationSafetyMargin)
 				}
+				if estimatedSize < minEstimatedTrackFloor {
+					estimatedSize = minEstimatedTrackFloor
+				}
+
+				tags := make(map[string]string)
+				if title != "" {
+					tags["title"] = title
+				}
+				artist := tr.Performer
+				if artist == "" {
+					artist = sheet.Performer
+				}
+				if artist != "" {
+					tags["artist"] = artist
+				}
+				if sheet.Performer != "" {
+					tags["album_artist"] = sheet.Performer
+				}
+				if sheet.Title != "" {
+					tags["album"] = sheet.Title
+				}
+				if tr.Num > 0 {
+					tags["track"] = strconv.Itoa(tr.Num)
+				}
+				if sheet.Date != "" {
+					tags["date"] = sheet.Date
+				}
+				if sheet.Genre != "" {
+					tags["genre"] = sheet.Genre
+				}
+				if sheet.DiscNumber != "" {
+					tags["disc"] = sheet.DiscNumber
+				}
+				if sheet.Songwriter != "" {
+					tags["composer"] = sheet.Songwriter
+				} else if tr.Songwriter != "" {
+					tags["composer"] = tr.Songwriter
+				}
+
+				virtualTracks = append(virtualTracks, VirtualTrack{
+					Num:           tr.Num,
+					Title:         title,
+					Performer:     tr.Performer,
+					EstimatedSize: estimatedSize,
+					Slice: track.Slice{
+						SourceAudioPath:  audioPath,
+						SourceModTime:    audioFi.ModTime(),
+						SourceSize:       audioFi.Size(),
+						Start:            tr.Start,
+						End:              tr.End,
+						TargetSampleRate: targetRate,
+						TargetBits:       targetBits,
+						Tags:             tags,
+					},
+				})
 			}
+		}
+
+		if skipCue {
+			continue
+		}
+
+		for _, p := range sourcePaths {
+			claimedAudios[p] = true
 		}
 
 		album := &Album{
-			CuePath:         cuePath,
-			SourceAudioPath: audioPath,
-			Sheet:           sheet,
-			Tracks:          make([]VirtualTrack, len(tracks)),
-		}
-
-		for i, tr := range tracks {
-			title := tr.Title
-			if title == "" {
-				title = fmt.Sprintf("Track %02d", tr.Num)
-			}
-
-			trackDuration := float64(0)
-			if tr.End > tr.Start {
-				trackDuration = tr.End - tr.Start
-			} else if totalKnownDuration > tr.Start {
-				trackDuration = totalKnownDuration - tr.Start
-			}
-
-			estimatedSize := int64(0)
-			if trackDuration > 0 && totalKnownDuration > 0 {
-				estimatedSize = int64(float64(totalAudioSize) * (trackDuration / totalKnownDuration) * qualityRatio * estimationSafetyMargin)
-			} else {
-				estimatedSize = int64(float64(totalAudioSize) / float64(len(tracks)) * qualityRatio * estimationSafetyMargin)
-			}
-			if estimatedSize < minEstimatedTrackFloor {
-				estimatedSize = minEstimatedTrackFloor
-			}
-
-			tags := make(map[string]string)
-			if title != "" {
-				tags["title"] = title
-			}
-			artist := tr.Performer
-			if artist == "" {
-				artist = sheet.Performer
-			}
-			if artist != "" {
-				tags["artist"] = artist
-			}
-			if sheet.Performer != "" {
-				tags["album_artist"] = sheet.Performer
-			}
-			if sheet.Title != "" {
-				tags["album"] = sheet.Title
-			}
-			if tr.Num > 0 {
-				tags["track"] = strconv.Itoa(tr.Num)
-			}
-			if sheet.Date != "" {
-				tags["date"] = sheet.Date
-			}
-			if sheet.Genre != "" {
-				tags["genre"] = sheet.Genre
-			}
-			if sheet.DiscNumber != "" {
-				tags["disc"] = sheet.DiscNumber
-			}
-			if sheet.Songwriter != "" {
-				tags["composer"] = sheet.Songwriter
-			} else if tr.Songwriter != "" {
-				tags["composer"] = tr.Songwriter
-			}
-
-			album.Tracks[i] = VirtualTrack{
-				Num:           tr.Num,
-				Title:         title,
-				Performer:     tr.Performer,
-				EstimatedSize: estimatedSize,
-				Slice: track.Slice{
-					SourceAudioPath:  audioPath,
-					SourceModTime:    audioFi.ModTime(),
-					SourceSize:       audioFi.Size(),
-					Start:            tr.Start,
-					End:              tr.End,
-					TargetSampleRate: targetRate,
-					TargetBits:       targetBits,
-					Tags:             tags,
-				},
-			}
+			CuePath:          cuePath,
+			SourceAudioPaths: sourcePaths,
+			Sheet:            sheet,
+			Tracks:           virtualTracks,
 		}
 
 		albums = append(albums, album)
@@ -245,7 +275,9 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger, maxQu
 	}
 
 	for _, album := range albums {
-		dirState.HiddenMonoliths[norm.NFC.String(filepath.Base(album.SourceAudioPath))] = true
+		for _, src := range album.SourceAudioPaths {
+			dirState.HiddenMonoliths[norm.NFC.String(filepath.Base(src))] = true
+		}
 	}
 
 	rawEntries, _ := os.ReadDir(dirPath)
@@ -373,4 +405,25 @@ func findPrimaryArtwork(artworks map[string]string) string {
 		}
 	}
 	return ""
+}
+
+// isAlreadySplit returns true if a CUE sheet defines multiple files
+// and each file contains at most one indexed track (meaning the album
+// is already split into individual track files).
+func isAlreadySplit(sheet *cue.Sheet) bool {
+	if len(sheet.Files) <= 1 {
+		return false
+	}
+	for _, f := range sheet.Files {
+		indexCount := 0
+		for _, tr := range f.Tracks {
+			if tr.HasIndex {
+				indexCount++
+			}
+		}
+		if indexCount > 1 {
+			return false
+		}
+	}
+	return true
 }

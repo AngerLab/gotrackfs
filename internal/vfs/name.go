@@ -52,21 +52,22 @@ func formatTrackFilename(num int, trackArtist, albumArtist, title, ext string) s
 	return fmt.Sprintf("%02d. %s%s", num, cleanTitle, ext)
 }
 
+var filenameReplacer = strings.NewReplacer(
+	"/", "-",
+	"\\", "-",
+	":", " -",
+	"*", "",
+	"?", "",
+	"\"", "",
+	"<", "",
+	">", "",
+	"|", "-",
+)
+
 // sanitizeFilename sanitizes title and artist strings for safe use as filesystem names across platforms.
 func sanitizeFilename(s string) string {
 	s = strings.TrimSpace(s)
-	replacer := strings.NewReplacer(
-		"/", "-",
-		"\\", "-",
-		":", " -",
-		"*", "",
-		"?", "",
-		"\"", "",
-		"<", "",
-		">", "",
-		"|", "-",
-	)
-	res := replacer.Replace(s)
+	res := filenameReplacer.Replace(s)
 	res = strings.TrimSpace(res)
 	if res == "" {
 		return "Track"

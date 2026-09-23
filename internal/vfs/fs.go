@@ -108,12 +108,23 @@ func New(opts Options) *VFS {
 	}
 }
 
+// nodeKind classifies what a resolved path refers to. The flags previously
+// carried separately (isVirtualDir, isHidden, track != nil) are mutually
+// exclusive, so they are merged into one switchable kind.
+type nodeKind int
+
+const (
+	nodeKindReal       nodeKind = iota // plain real file/dir (or mirrored artwork path)
+	nodeKindVirtualDir                 // virtual album subdirectory (e.g. CD1)
+	nodeKindTrack                      // virtual sliced track
+	nodeKindHidden                     // hidden monolith: must look absent
+)
+
 type resolvedNode struct {
-	realPath     string
-	track        *VirtualTrack
-	isVirtualDir bool
-	subDirState  *DirState
-	isHidden     bool
+	kind        nodeKind
+	realPath    string
+	track       *VirtualTrack
+	subDirState *DirState
 }
 
 func cleanNormPath(path string) string {
@@ -122,89 +133,70 @@ func cleanNormPath(path string) string {
 
 func (v *VFS) resolve(path, op string) resolvedNode {
 	cleanPath := cleanNormPath(path)
+	realPath := filepath.Join(v.sourceRoot, cleanPath)
 	if cleanPath == "/" || cleanPath == "." {
-		return resolvedNode{
-			realPath: v.sourceRoot,
-		}
+		return resolvedNode{kind: nodeKindReal, realPath: v.sourceRoot}
 	}
 
 	base := filepath.Base(cleanPath)
 	dir := filepath.Dir(cleanPath)
-	realDir := filepath.Join(v.sourceRoot, dir)
-	realPath := filepath.Join(v.sourceRoot, cleanPath)
 
-	// 1. Try resolving dir as a real directory
+	// 1. The directory itself has cached state (real dir with virtual content,
+	//    or a real dir without any): classify base against it.
+	if dirState := v.dirStateFor(dir, cleanPath, op); dirState != nil {
+		return v.resolveInDirState(dirState, base, dir, realPath)
+	}
+
+	// 2. dir may be a virtual subdirectory inside a real parent
+	//    (e.g. /TheWall/CD1/01. In the Flesh.flac).
+	if parentState := v.dirStateFor(filepath.Dir(dir), cleanPath, op); parentState != nil {
+		if subState, ok := parentState.Subdirs[filepath.Base(dir)]; ok {
+			return v.resolveInSubDir(subState, base, realPath)
+		}
+	}
+
+	// 3. Fallback: plain real path.
+	return resolvedNode{kind: nodeKindReal, realPath: realPath}
+}
+
+// dirStateFor returns the cached directory state for a virtual path component,
+// logging cache errors (except plain not-exist) against the operation.
+func (v *VFS) dirStateFor(dir, cleanPath, op string) *DirState {
+	realDir := filepath.Join(v.sourceRoot, dir)
 	dirState, err := v.cache.GetDirState(realDir)
 	if err != nil && !os.IsNotExist(err) {
 		v.logger.Debug("cache: failed to get dir state", "op", op, "dir", realDir, "path", cleanPath, "error", err)
 	}
+	return dirState
+}
 
-	if dirState != nil {
-		node := resolvedNode{
-			realPath: realPath,
-		}
-
-		// Check if base is a virtual subdirectory (e.g. CD1)
-		if subState, ok := dirState.Subdirs[base]; ok {
-			node.isVirtualDir = true
-			node.subDirState = subState
-			return node
-		}
-
-		// Check if base is a hidden monolith
-		if !v.keepAlbum && dirState.HiddenMonoliths[base] {
-			node.isHidden = true
-			return node
-		}
-
-		// Check if base is a virtual track (in flat single-album mode)
-		if vt, ok := dirState.TracksByName[base]; ok {
-			node.track = vt
-			return node
-		}
-
-		// Otherwise it's a real file/dir in realDir
-		return node
+// resolveInDirState classifies base against the cached state of its directory:
+// a virtual subdirectory, a hidden monolith, a virtual track, or a real entry.
+func (v *VFS) resolveInDirState(dirState *DirState, base, dir, realPath string) resolvedNode {
+	if subState, ok := dirState.Subdirs[base]; ok {
+		return resolvedNode{kind: nodeKindVirtualDir, realPath: realPath, subDirState: subState}
 	}
-
-	// 2. dir might be a virtual subdirectory inside a real parent dir (e.g. /TheWall/CD1/01. In the Flesh.flac)
-	parentDir := filepath.Dir(dir)
-	subDirName := filepath.Base(dir)
-	parentRealDir := filepath.Join(v.sourceRoot, parentDir)
-
-	parentState, pErr := v.cache.GetDirState(parentRealDir)
-	if pErr != nil && !os.IsNotExist(pErr) {
-		v.logger.Debug("cache: failed to get parent dir state", "op", op, "parent", parentRealDir, "path", cleanPath, "error", pErr)
+	if !v.keepAlbum && dirState.HiddenMonoliths[base] {
+		return resolvedNode{kind: nodeKindHidden, realPath: realPath}
 	}
-
-	if parentState != nil {
-		if subState, ok := parentState.Subdirs[subDirName]; ok {
-			node := resolvedNode{
-				realPath:    realPath,
-				subDirState: subState,
-			}
-
-			// Check if base is a virtual track in this subState
-			if vt, ok := subState.TracksByName[base]; ok {
-				node.track = vt
-				return node
-			}
-
-			// Check if base is a mirrored file (e.g. cover.jpg)
-			if mirrorPath, ok := subState.MirroredFiles[base]; ok {
-				node.realPath = mirrorPath
-				return node
-			}
-
-			// Neither track nor mirrored file in virtual subdir -> it does not exist
-			return node
-		}
+	if vt, ok := dirState.TracksByName[base]; ok {
+		return resolvedNode{kind: nodeKindTrack, realPath: realPath, track: vt}
 	}
+	// Otherwise it is a real file/dir in dir.
+	return resolvedNode{kind: nodeKindReal, realPath: realPath}
+}
 
-	// 3. Fallback: plain real path
-	return resolvedNode{
-		realPath: realPath,
+// resolveInSubDir classifies base inside a virtual subdirectory: a virtual
+// track, a mirrored artwork file, or nothing (falls back to the real path,
+// which simply does not exist under the virtual subdir).
+func (v *VFS) resolveInSubDir(subState *DirState, base, realPath string) resolvedNode {
+	if vt, ok := subState.TracksByName[base]; ok {
+		return resolvedNode{kind: nodeKindTrack, realPath: realPath, track: vt}
 	}
+	if mirrorPath, ok := subState.MirroredFiles[base]; ok {
+		return resolvedNode{kind: nodeKindReal, realPath: mirrorPath}
+	}
+	return resolvedNode{kind: nodeKindReal, realPath: realPath}
 }
 
 func (v *VFS) Statfs(path string, stat *fuse.Statfs_t) int {
@@ -226,11 +218,11 @@ func (v *VFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 	}
 
 	node := v.resolve(cleanPath, "Getattr")
-	if node.isHidden {
+	switch node.kind {
+	case nodeKindHidden:
 		return -fuse.ENOENT
-	}
 
-	if node.isVirtualDir {
+	case nodeKindVirtualDir:
 		parentRealDir := filepath.Dir(node.realPath)
 		var st syscall.Stat_t
 		if err := lstatSyscall(parentRealDir, &st); err != nil {
@@ -239,9 +231,8 @@ func (v *VFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 		copyStat(stat, &st)
 		stat.Mode = syscall.S_IFDIR | 0555
 		return 0
-	}
 
-	if node.track != nil {
+	case nodeKindTrack:
 		// Virtual track entry
 		var st syscall.Stat_t
 		if err := lstatSyscall(node.track.Slice.SourceAudioPath, &st); err != nil {
@@ -277,10 +268,11 @@ func (v *VFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 		stat.Size = size
 		stat.Mode = syscall.S_IFREG | 0444
 		return 0
-	}
 
-	// Real file / directory (or mirrored file)
-	return v.statRealPath(node.realPath, stat)
+	default:
+		// Real file / directory (or mirrored file).
+		return v.statRealPath(node.realPath, stat)
+	}
 }
 
 func (v *VFS) statRealPath(realPath string, stat *fuse.Stat_t) int {
@@ -299,13 +291,12 @@ func (v *VFS) Opendir(path string) (int, uint64) {
 	}
 
 	node := v.resolve(cleanPath, "Opendir")
-	if node.isHidden {
+	switch node.kind {
+	case nodeKindHidden:
 		return -fuse.ENOENT, ^uint64(0)
-	}
-	if node.isVirtualDir {
+	case nodeKindVirtualDir:
 		return 0, 0
-	}
-	if node.track != nil {
+	case nodeKindTrack:
 		return -fuse.ENOTDIR, ^uint64(0)
 	}
 
@@ -328,13 +319,12 @@ func (v *VFS) Readdir(path string, fill func(name string, stat *fuse.Stat_t, ofs
 	cleanPath := cleanNormPath(path)
 	if cleanPath != "/" && cleanPath != "." {
 		node := v.resolve(cleanPath, "Readdir")
-		if node.isHidden {
+		switch node.kind {
+		case nodeKindHidden:
 			return -fuse.ENOENT
-		}
-		if node.track != nil {
+		case nodeKindTrack:
 			return -fuse.ENOTDIR
-		}
-		if node.isVirtualDir {
+		case nodeKindVirtualDir:
 			fill(".", nil, 0)
 			fill("..", nil, 0)
 
@@ -405,13 +395,12 @@ func (v *VFS) Open(path string, flags int) (int, uint64) {
 
 	cleanPath := cleanNormPath(path)
 	node := v.resolve(cleanPath, "Open")
-	if node.isHidden {
+	switch node.kind {
+	case nodeKindHidden:
 		return -fuse.ENOENT, ^uint64(0)
-	}
-	if node.isVirtualDir {
+	case nodeKindVirtualDir:
 		return -fuse.EISDIR, ^uint64(0)
-	}
-	if node.track != nil {
+	case nodeKindTrack:
 		if v.slicer == nil {
 			v.logger.Warn("vfs: cannot slice audio track: no audio slicer configured (is ffmpeg installed?)", "track", node.track.FileName)
 			return -fuse.ENOSYS, ^uint64(0)
@@ -450,6 +439,8 @@ func (v *VFS) Open(path string, flags int) (int, uint64) {
 		v.mu.Unlock()
 
 		return 0, fh
+
+	default:
 	}
 
 	f, err := openRealFile(node.realPath)

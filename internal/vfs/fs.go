@@ -381,57 +381,49 @@ func (v *VFS) Open(path string, flags int) (int, uint64) {
 		return -fuse.EACCES, ^uint64(0)
 	}
 
-	cleanPath := cleanNormPath(path)
-	node := v.resolve(cleanPath, "Open")
+	node := v.resolve(cleanNormPath(path), "Open")
 	switch node.kind {
 	case nodeKindHidden:
 		return -fuse.ENOENT, ^uint64(0)
 	case nodeKindVirtualDir:
 		return -fuse.EISDIR, ^uint64(0)
 	case nodeKindTrack:
-		if v.slicer == nil {
-			v.logger.Warn("vfs: cannot slice audio track: no audio slicer configured (is ffmpeg installed?)", "track", node.track.FileName)
-			return -fuse.ENOSYS, ^uint64(0)
-		}
-
-		tempPath, err := v.slicer.Acquire(v.ctx, node.track.CutterKey, node.track.Slice)
-		if err != nil {
-			if err != context.Canceled {
-				v.logger.Error("vfs: failed to slice audio track", "track", node.track.FileName, "error", err)
-			}
-			return -fuse.EIO, ^uint64(0)
-		}
-
-		f, err := os.Open(tempPath)
-		if err != nil {
-			v.slicer.Release(node.track.CutterKey)
-			v.logger.Error("vfs: failed to open sliced audio temp file", "path", tempPath, "error", err)
-			return -fuse.EIO, ^uint64(0)
-		}
-
-		h := &fileHandle{
-			cutterKey: node.track.CutterKey,
-		}
-		h.file.Store(f)
-
-		v.mu.Lock()
-		if v.ctx.Err() != nil {
-			v.mu.Unlock()
-			_ = f.Close()
-			v.slicer.Release(node.track.CutterKey)
-			return -fuse.ENODEV, ^uint64(0)
-		}
-		v.nextHandle++
-		fh := v.nextHandle
-		v.openFiles[fh] = h
-		v.mu.Unlock()
-
-		return 0, fh
-
+		return v.openTrack(node)
 	default:
+		return v.openReal(node.realPath)
+	}
+}
+
+// openTrack slices the virtual audio track on demand and registers an open handle.
+// Returns ENOSYS if no slicer is configured, EIO on slicing errors, ENODEV if the
+// filesystem is being torn down.
+func (v *VFS) openTrack(node resolvedNode) (int, uint64) {
+	if v.slicer == nil {
+		v.logger.Warn("vfs: cannot slice audio track: no audio slicer configured (is ffmpeg installed?)", "track", node.track.FileName)
+		return -fuse.ENOSYS, ^uint64(0)
 	}
 
-	f, err := openRealFile(node.realPath)
+	tempPath, err := v.slicer.Acquire(v.ctx, node.track.CutterKey, node.track.Slice)
+	if err != nil {
+		if err != context.Canceled {
+			v.logger.Error("vfs: failed to slice audio track", "track", node.track.FileName, "error", err)
+		}
+		return -fuse.EIO, ^uint64(0)
+	}
+
+	f, err := os.Open(tempPath)
+	if err != nil {
+		v.slicer.Release(node.track.CutterKey)
+		v.logger.Error("vfs: failed to open sliced audio temp file", "path", tempPath, "error", err)
+		return -fuse.EIO, ^uint64(0)
+	}
+
+	return v.registerHandle(f, node.track.CutterKey)
+}
+
+// openReal opens a plain file from the source tree, returning ENOENT/EACCES/EISDIR as appropriate.
+func (v *VFS) openReal(realPath string) (int, uint64) {
+	f, err := openRealFile(realPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return -fuse.ENOENT, ^uint64(0)
@@ -444,15 +436,29 @@ func (v *VFS) Open(path string, flags int) (int, uint64) {
 		return -fuse.EISDIR, ^uint64(0)
 	}
 
-	h := &fileHandle{}
-	h.file.Store(f)
+	return v.registerHandle(f, "")
+}
 
+// registerHandle assigns the next handle id to f and stores it in the open-files table.
+// For sliced tracks it also wires the cutter key so Release can decrement the refcount.
+// Returns ENODEV if the filesystem is already shutting down (handle table unusable).
+func (v *VFS) registerHandle(f *os.File, cutterKey string) (int, uint64) {
 	v.mu.Lock()
+
+	if v.ctx.Err() != nil && cutterKey != "" {
+		v.mu.Unlock()
+		_ = f.Close()
+		v.slicer.Release(cutterKey)
+		return -fuse.ENODEV, ^uint64(0)
+	}
 	v.nextHandle++
 	fh := v.nextHandle
-	v.openFiles[fh] = h
-	v.mu.Unlock()
 
+	h := &fileHandle{cutterKey: cutterKey}
+	h.file.Store(f)
+	v.openFiles[fh] = h
+
+	v.mu.Unlock()
 	return 0, fh
 }
 

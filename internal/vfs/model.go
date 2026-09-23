@@ -20,7 +20,6 @@ type VirtualTrack struct {
 // Album represents a parsed album with its virtualized tracks.
 type Album struct {
 	CuePath          string
-	SourceAudioPath  string   // Primary audio file (for backward compat)
 	SourceAudioPaths []string // All source audio files for this album
 	Sheet            *cue.Sheet
 	Tracks           []VirtualTrack

@@ -73,14 +73,16 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger, maxQu
 
 		// Multi-file CUEs where every file is already split per track are left untouched
 		if isAlreadySplit(sheet) {
-			logger.Debug("vfs: skipping multi-file cue (already split per track)", "path", cuePath)
+			logger.Debug("vfs: skipping multi-file cue (already split per track)",
+				"path", cuePath,
+				"files", len(sheet.Files),
+				"tracks", len(tracks))
 			continue
 		}
 
 		var (
 			virtualTracks []VirtualTrack
 			sourcePaths   []string
-			albumAudios   []string
 			skipCue       bool
 		)
 
@@ -91,11 +93,11 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger, maxQu
 			}
 
 			declaredFile := f.Name
-			currentClaimed := make(map[string]bool, len(claimedAudios)+len(albumAudios))
+			currentClaimed := make(map[string]bool, len(claimedAudios)+len(sourcePaths))
 			for k, v := range claimedAudios {
 				currentClaimed[k] = v
 			}
-			for _, p := range albumAudios {
+			for _, p := range sourcePaths {
 				currentClaimed[p] = true
 			}
 
@@ -113,7 +115,6 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger, maxQu
 				break
 			}
 
-			albumAudios = append(albumAudios, audioPath)
 			sourcePaths = append(sourcePaths, audioPath)
 
 			audioInfo, probeErr := audio.Probe(audioPath)
@@ -239,17 +240,16 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger, maxQu
 			}
 		}
 
-		if skipCue || len(virtualTracks) == 0 {
+		if skipCue {
 			continue
 		}
 
-		for _, p := range albumAudios {
+		for _, p := range sourcePaths {
 			claimedAudios[p] = true
 		}
 
 		album := &Album{
 			CuePath:          cuePath,
-			SourceAudioPath:  sourcePaths[0],
 			SourceAudioPaths: sourcePaths,
 			Sheet:            sheet,
 			Tracks:           virtualTracks,

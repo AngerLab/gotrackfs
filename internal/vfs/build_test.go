@@ -424,6 +424,11 @@ FILE "side_b.flac" FLAC
 		t.Errorf("expected side_b.flac to be hidden")
 	}
 
+	// Verify SourceAudioPaths
+	if len(album.SourceAudioPaths) != 2 || album.SourceAudioPaths[0] != sideAPath || album.SourceAudioPaths[1] != sideBPath {
+		t.Errorf("unexpected SourceAudioPaths: %+v", album.SourceAudioPaths)
+	}
+
 	if facts == nil || facts.dirModTime.IsZero() {
 		t.Errorf("expected valid facts")
 	}
@@ -470,3 +475,182 @@ FILE "track02.flac" WAVE
 		t.Errorf("expected valid facts")
 	}
 }
+
+func TestBuildDirState_MultiFileCue_MissingSideSkipsAllAndDoesNotLeakClaim(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// 1. Multi-file CUE where side B is missing
+	brokenCue := `TITLE "Broken Multi"
+FILE "side_a.flac" FLAC
+  TRACK 01 AUDIO
+    TITLE "Track 1"
+    INDEX 01 00:00:00
+  TRACK 02 AUDIO
+    TITLE "Track 2"
+    INDEX 01 02:00:00
+FILE "missing_side_b.flac" FLAC
+  TRACK 03 AUDIO
+    TITLE "Track 3"
+    INDEX 01 00:00:00
+  TRACK 04 AUDIO
+    TITLE "Track 4"
+    INDEX 01 02:00:00
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "01_broken.cue"), []byte(brokenCue), 0644); err != nil {
+		t.Fatal(err)
+	}
+	sideAPath := filepath.Join(tmpDir, "side_a.flac")
+	if err := os.WriteFile(sideAPath, make([]byte, 1024*1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Second valid CUE that re-uses side_a.flac to prove claimedAudios was not contaminated
+	validCue := `TITLE "Valid Album"
+FILE "side_a.flac" FLAC
+  TRACK 01 AUDIO
+    TITLE "Track 1"
+    INDEX 01 00:00:00
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "02_valid.cue"), []byte(validCue), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	dirFi, err := os.Stat(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	state, _, err := buildDirState(tmpDir, dirFi, logger, track.Quality{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if state == nil {
+		t.Fatalf("expected non-nil state from valid cue")
+	}
+	if len(state.Albums) != 1 {
+		t.Fatalf("expected exactly 1 album (02_valid.cue), got %d", len(state.Albums))
+	}
+	if state.Albums[0].CuePath != filepath.Join(tmpDir, "02_valid.cue") {
+		t.Errorf("expected 02_valid.cue to succeed, got %s", state.Albums[0].CuePath)
+	}
+
+	logs := buf.String()
+	if !strings.Contains(logs, "audio file not found for cue") || !strings.Contains(logs, "missing_side_b.flac") {
+		t.Errorf("expected warning for missing_side_b.flac, got: %s", logs)
+	}
+}
+
+func makeWavHeader(rate, chans, bps uint32, durationSec float64) []byte {
+	byteRate := rate * chans * (bps / 8)
+	dataSize := uint32(durationSec * float64(byteRate))
+	buf := new(bytes.Buffer)
+	buf.WriteString("RIFF")
+	binary.Write(buf, binary.LittleEndian, uint32(36+dataSize))
+	buf.WriteString("WAVE")
+	buf.WriteString("fmt ")
+	binary.Write(buf, binary.LittleEndian, uint32(16))
+	binary.Write(buf, binary.LittleEndian, uint16(1)) // PCM
+	binary.Write(buf, binary.LittleEndian, uint16(chans))
+	binary.Write(buf, binary.LittleEndian, rate)
+	binary.Write(buf, binary.LittleEndian, byteRate)
+	binary.Write(buf, binary.LittleEndian, uint16(chans*(bps/8)))
+	binary.Write(buf, binary.LittleEndian, uint16(bps))
+	buf.WriteString("data")
+	binary.Write(buf, binary.LittleEndian, dataSize)
+	return buf.Bytes()
+}
+
+func TestBuildDirState_MultiFileCue_ProbedDurationAndMixedQuality(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	cueContent := `PERFORMER "Mixed Artist"
+TITLE "Mixed Album"
+FILE "side_a.wav" WAVE
+  TRACK 01 AUDIO
+    TITLE "Track 1"
+    INDEX 01 00:00:00
+  TRACK 02 AUDIO
+    TITLE "Track 2"
+    INDEX 01 00:50:00
+FILE "side_b.flac" FLAC
+  TRACK 03 AUDIO
+    TITLE "Track 3"
+    INDEX 01 00:00:00
+  TRACK 04 AUDIO
+    TITLE "Track 4"
+    INDEX 01 01:10:00
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "album.cue"), []byte(cueContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Side A: 48kHz, 2 channels, 24-bit WAV, 100 seconds duration
+	sideAWav := makeWavHeader(48000, 2, 24, 100.0)
+	sideAPath := filepath.Join(tmpDir, "side_a.wav")
+	if err := os.WriteFile(sideAPath, sideAWav, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Side B: 96kHz, 2 channels, 24-bit FLAC, 200 seconds duration (96000 * 200 samples)
+	sideBFlac := makeFlacHeaderWithSamples(96000, 2, 24, 96000*200)
+	sideBPath := filepath.Join(tmpDir, "side_b.flac")
+	if err := os.WriteFile(sideBPath, sideBFlac, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	dirFi, err := os.Stat(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Cap to 44.1kHz / 16-bit
+	cap16_44 := track.Quality{Bits: 16, SampleRate: 44100}
+	state, _, err := buildDirState(tmpDir, dirFi, nil, cap16_44)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if state == nil || len(state.Albums) != 1 {
+		t.Fatalf("expected 1 album, got: %+v", state)
+	}
+
+	album := state.Albums[0]
+	if len(album.Tracks) != 4 {
+		t.Fatalf("expected 4 tracks, got %d", len(album.Tracks))
+	}
+
+	// Verify Track 2 (last track of Side A) has End set to probed duration of Side A (100.0s)
+	tr2 := album.Tracks[1]
+	if tr2.Slice.End != 100.0 {
+		t.Errorf("track 2 End = %f, want 100.0 (probed WAV duration)", tr2.Slice.End)
+	}
+	if tr2.Slice.SourceAudioPath != sideAPath {
+		t.Errorf("track 2 source = %s, want %s", tr2.Slice.SourceAudioPath, sideAPath)
+	}
+	if tr2.Slice.TargetSampleRate != 44100 || tr2.Slice.TargetBits != 16 {
+		t.Errorf("track 2 targets = (%d, %d), want (44100, 16)", tr2.Slice.TargetSampleRate, tr2.Slice.TargetBits)
+	}
+
+	// Verify Track 4 (last track of Side B) has End set to probed duration of Side B (200.0s)
+	tr4 := album.Tracks[3]
+	if tr4.Slice.End != 200.0 {
+		t.Errorf("track 4 End = %f, want 200.0 (probed FLAC duration)", tr4.Slice.End)
+	}
+	if tr4.Slice.SourceAudioPath != sideBPath {
+		t.Errorf("track 4 source = %s, want %s", tr4.Slice.SourceAudioPath, sideBPath)
+	}
+	if tr4.Slice.TargetSampleRate != 44100 || tr4.Slice.TargetBits != 16 {
+		t.Errorf("track 4 targets = (%d, %d), want (44100, 16)", tr4.Slice.TargetSampleRate, tr4.Slice.TargetBits)
+	}
+
+	// Verify hidden monoliths
+	if !state.HiddenMonoliths["side_a.wav"] {
+		t.Errorf("expected side_a.wav to be hidden")
+	}
+	if !state.HiddenMonoliths["side_b.flac"] {
+		t.Errorf("expected side_b.flac to be hidden")
+	}
+}
+

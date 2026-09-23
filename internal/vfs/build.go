@@ -320,18 +320,11 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger, maxQu
 		// Multi-album: generate virtual subdirectories (e.g. CD1/, CD2/)
 		for albumIdx, album := range albums {
 			subName := norm.NFC.String(determineDiscDirName(album, albumIdx+1))
-			candSubName := subName
-			subSuffix := 2
-			for {
-				_, existsSub := dirState.Subdirs[candSubName]
-				isShadowing := realNames[candSubName]
-				if !existsSub && !isShadowing {
-					break
-				}
-				candSubName = fmt.Sprintf("%s (%d)", subName, subSuffix)
-				subSuffix++
-			}
-			if candSubName != subName {
+			candSubName, collided := uniqueName(subName, func(c string) bool {
+				_, existsSub := dirState.Subdirs[c]
+				return existsSub || realNames[c]
+			})
+			if collided {
 				logger.Warn("vfs: virtual subdir name collision, adding suffix", "dir", dirPath, "original", subName, "assigned", candSubName)
 			}
 			subName = candSubName
@@ -369,18 +362,10 @@ func assignTrackFilenames(album *Album, occupiedNames map[string]bool, context s
 	for i := range album.Tracks {
 		vt := &album.Tracks[i]
 		baseName := norm.NFC.String(formatTrackFilename(vt.Num, vt.Performer, album.Sheet.Performer, vt.Title, ext))
-		candidateName := baseName
-		suffix := 2
-		for {
-			isDuplicateTrack := tracksByName[candidateName] != nil
-			isOccupied := occupiedNames[candidateName]
-			if !isDuplicateTrack && !isOccupied {
-				break
-			}
-			candidateName = addFilenameSuffix(baseName, suffix)
-			suffix++
-		}
-		if candidateName != baseName && logger != nil {
+		candidateName, collided := uniqueName(baseName, func(c string) bool {
+			return tracksByName[c] != nil || occupiedNames[c]
+		})
+		if collided && logger != nil {
 			logger.Warn("vfs: track filename collision, adding suffix", "context", context, "original", baseName, "assigned", candidateName)
 		}
 		vt.FileName = candidateName

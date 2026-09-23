@@ -653,4 +653,3 @@ FILE "side_b.flac" FLAC
 		t.Errorf("expected side_b.flac to be hidden")
 	}
 }
-

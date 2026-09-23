@@ -15,6 +15,32 @@ type rawCommand struct {
 	params [][]byte
 }
 
+// textFieldSetters maps commands that set the same-named field on either the
+// current track or the album, depending on whether a TRACK block is open.
+var textFieldSetters = map[string]func(sheet *Sheet, track *Track, val string){
+	"TITLE": func(s *Sheet, t *Track, v string) {
+		if t != nil {
+			t.Title = v
+		} else {
+			s.Title = v
+		}
+	},
+	"PERFORMER": func(s *Sheet, t *Track, v string) {
+		if t != nil {
+			t.Performer = v
+		} else {
+			s.Performer = v
+		}
+	},
+	"SONGWRITER": func(s *Sheet, t *Track, v string) {
+		if t != nil {
+			t.Songwriter = v
+		} else {
+			s.Songwriter = v
+		}
+	},
+}
+
 // ParseFile reads a CUE sheet from disk, performs two-pass parsing and encoding detection.
 func ParseFile(path string) (*Sheet, error) {
 	f, err := os.Open(path)
@@ -99,37 +125,16 @@ func parsePreprocessed(data []byte) (*Sheet, error) {
 			params[i] = decode(p)
 		}
 
+		// Title/performer/songwriter share one shape: set on the open track,
+		// else on the sheet.
+		if setter, ok := textFieldSetters[rc.cmd]; ok {
+			if len(params) > 0 {
+				setter(sheet, curTrack, params[0])
+			}
+			continue
+		}
+
 		switch rc.cmd {
-		case "TITLE":
-			if len(params) > 0 {
-				val := params[0]
-				if curTrack != nil {
-					curTrack.Title = val
-				} else {
-					sheet.Title = val
-				}
-			}
-
-		case "PERFORMER":
-			if len(params) > 0 {
-				val := params[0]
-				if curTrack != nil {
-					curTrack.Performer = val
-				} else {
-					sheet.Performer = val
-				}
-			}
-
-		case "SONGWRITER":
-			if len(params) > 0 {
-				val := params[0]
-				if curTrack != nil {
-					curTrack.Songwriter = val
-				} else {
-					sheet.Songwriter = val
-				}
-			}
-
 		case "FILE":
 			if len(params) > 0 {
 				fileType := "WAVE"

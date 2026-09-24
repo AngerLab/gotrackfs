@@ -23,9 +23,8 @@ type normFallbackFS struct {
 
 // RetryNormForms runs op(name) and, when it fails with fs.ErrNotExist,
 // retries op on the NFD and NFC normalized forms of name. It is the single
-// implementation of the NFC/NFD retry: WithNFDFallback decorates an FS with
-// it, and callers that cannot go through an FS (symlink-aware lstat, slicer
-// file handles) use it directly.
+// implementation of the NFC/NFD retry: every method of WithNFDFallback
+// delegates to it, including Lstat for symlink-aware callers.
 func RetryNormForms[T any](name string, op func(string) (T, error)) (T, error) {
 	v, err := op(name)
 	if err == nil || !errors.Is(err, fs.ErrNotExist) {
@@ -45,6 +44,12 @@ func RetryNormForms[T any](name string, op func(string) (T, error)) (T, error) {
 // Stat implements FS.
 func (n *normFallbackFS) Stat(name string) (os.FileInfo, error) {
 	return RetryNormForms(name, n.FS.Stat)
+}
+
+// Lstat implements FS. Like Stat it retries the NFC/NFD forms: symlinks in
+// either normalization must resolve on byte-exact filesystems too.
+func (n *normFallbackFS) Lstat(name string) (os.FileInfo, error) {
+	return RetryNormForms(name, n.FS.Lstat)
 }
 
 // List implements FS.

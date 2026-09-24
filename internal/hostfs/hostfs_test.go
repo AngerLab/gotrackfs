@@ -166,8 +166,9 @@ func TestNFDFallback_FindsNFDStoredFileViaNFCQuery(t *testing.T) {
 
 // TestNFDFallback_RealDiskByteExactHost proves the fallback against the real
 // filesystem: on a byte-exact host (Linux ext4, NFS) an NFD-stored name is
-// NOT found through the NFC query, and WithNFDFallback finds it. Hosts with
-// normalization-insensitive filesystems (APFS) skip: there is nothing to prove.
+// NOT found through the NFC query, and WithNFDFallback finds it — for Stat,
+// Lstat and Open alike. Hosts with normalization-insensitive filesystems
+// (APFS) skip: there is nothing to prove.
 func TestNFDFallback_RealDiskByteExactHost(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, norm.NFD.String("Épisode 1")), 0o755); err != nil {
@@ -178,6 +179,7 @@ func TestNFDFallback_RealDiskByteExactHost(t *testing.T) {
 	}
 
 	plain := Default()
+	wrapped := WithNFDFallback(plain)
 	nfcPath := filepath.Join(dir, norm.NFC.String("Épisode 1"), "flac")
 	if _, err := plain.Stat(nfcPath); err == nil {
 		t.Skip("host filesystem is normalization-insensitive; nothing to prove")
@@ -185,8 +187,46 @@ func TestNFDFallback_RealDiskByteExactHost(t *testing.T) {
 		t.Fatalf("byte-exact miss must be ErrNotExist, got %v", err)
 	}
 
-	if _, err := WithNFDFallback(plain).Stat(nfcPath); err != nil {
-		t.Errorf("WithNFDFallback.Stat(nfc) = %v, want success via NFD retry", err)
+	ops := []struct {
+		name string
+		do   func(FS) error
+	}{
+		{"Stat", func(f FS) error {
+			_, err := f.Stat(nfcPath)
+			return err
+		}},
+		{"Lstat", func(f FS) error {
+			_, err := f.Lstat(nfcPath)
+			return err
+		}},
+		{"Open", func(f FS) error {
+			fh, err := f.Open(nfcPath)
+			if err == nil {
+				_ = fh.Close()
+			}
+			return err
+		}},
+	}
+	for _, op := range ops {
+		if err := op.do(plain); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%s: byte-exact miss on plain = %v, want ErrNotExist", op.name, err)
+			continue
+		}
+		if err := op.do(wrapped); err != nil {
+			t.Errorf("%s: WithNFDFallback = %v, want success via NFD retry", op.name, err)
+		}
+	}
+}
+
+func TestDiskFS_OpenRejectsDirectories(t *testing.T) {
+	dir := t.TempDir()
+	f, err := Default().Open(dir)
+	if err == nil {
+		_ = f.Close()
+		t.Fatal("disk Open on a directory must fail per the FS contract")
+	}
+	if !errors.Is(err, fs.ErrInvalid) {
+		t.Errorf("disk Open on dir err = %v, want fs.ErrInvalid", err)
 	}
 }
 

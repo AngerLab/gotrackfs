@@ -32,6 +32,12 @@ type FS interface {
 	// It must return an error wrapping fs.ErrNotExist when missing.
 	Stat(name string) (os.FileInfo, error)
 
+	// Lstat returns a FileInfo describing the named file or directory
+	// without following a final symlink. Filesystems without symlinks
+	// (MemFS) return the same result as Stat. It must return an error
+	// wrapping fs.ErrNotExist when missing.
+	Lstat(name string) (os.FileInfo, error)
+
 	// List returns a listing of the given directory. The entries are
 	// relative to dir (same semantics as os.ReadDir).
 	List(dir string) ([]fs.DirEntry, error)
@@ -48,7 +54,22 @@ func Default() FS { return diskFS{} }
 type diskFS struct{}
 
 func (diskFS) Stat(name string) (os.FileInfo, error) { return os.Stat(name) }
+func (diskFS) Lstat(name string) (os.FileInfo, error) {
+	return os.Lstat(name)
+}
 func (diskFS) List(dir string) ([]fs.DirEntry, error) {
 	return os.ReadDir(dir)
 }
-func (diskFS) Open(name string) (File, error) { return os.Open(name) }
+func (diskFS) Open(name string) (File, error) {
+	f, err := os.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	// The FS contract says Open must reject directories; os.Open lets them
+	// through, so enforce it here for callers that map errors to EISDIR.
+	if fi, err := f.Stat(); err == nil && fi.IsDir() {
+		_ = f.Close()
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
+	}
+	return f, nil
+}

@@ -119,6 +119,11 @@ func (m *MemFS) Stat(name string) (os.FileInfo, error) {
 	return snapshotFileInfo(n), nil
 }
 
+// Lstat implements FS. MemFS has no symlinks, so this is identical to Stat.
+func (m *MemFS) Lstat(name string) (os.FileInfo, error) {
+	return m.Stat(name)
+}
+
 // List implements FS.
 func (m *MemFS) List(dir string) ([]fs.DirEntry, error) {
 	m.mu.RLock()

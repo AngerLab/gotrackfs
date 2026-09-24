@@ -451,8 +451,10 @@ func (v *VFS) openReal(realPath string) (int, uint64) {
 }
 
 // registerHandle assigns the next handle id to f and stores it in the open-files table.
-// For sliced tracks it also wires the cutter key so Release can decrement the refcount.
-// Returns ENODEV if the filesystem is already shutting down (handle table unusable).
+// Sliced-track handles carry their cutter key so Release can decrement the
+// refcount; once the filesystem context is cancelled these are refused with
+// ENODEV and the lease is returned to the slicer. Plain file handles are still
+// registered during shutdown — the handle table remains usable for them.
 func (v *VFS) registerHandle(f *os.File, cutterKey string) (int, uint64) {
 	v.mu.Lock()
 

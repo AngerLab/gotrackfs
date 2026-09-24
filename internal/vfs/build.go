@@ -65,6 +65,8 @@ func buildDirState(fs hostfs.FS, dirPath string, dirFi os.FileInfo, logger *slog
 	dirState := baseDirState(albums)
 	realNames, artwork := scanDirEntries(dirPath)
 	assignArtwork(albums, findPrimaryArtwork(artwork))
+	// Cutter keys must be computed after artwork: Slice.Key() hashes ArtworkPath.
+	finalizeTrackCutterKeys(albums)
 
 	if len(albums) == 1 {
 		// Single album: flat layout directly in parent directory.
@@ -374,10 +376,20 @@ func assignArtwork(albums []*Album, artworkPath string) {
 	for _, album := range albums {
 		for i := range album.Tracks {
 			album.Tracks[i].Slice.ArtworkPath = artworkPath
-			album.Tracks[i].CutterKey = album.Tracks[i].Slice.Key()
 			if artworkSize > 0 {
 				album.Tracks[i].EstimatedSize += artworkSize
 			}
+		}
+	}
+}
+
+// finalizeTrackCutterKeys computes the deduplication key for every virtual
+// track's slice. It must run after assignArtwork: Slice.Key() hashes
+// ArtworkPath, so the key is only stable once artwork is attached.
+func finalizeTrackCutterKeys(albums []*Album) {
+	for _, album := range albums {
+		for i := range album.Tracks {
+			album.Tracks[i].CutterKey = album.Tracks[i].Slice.Key()
 		}
 	}
 }

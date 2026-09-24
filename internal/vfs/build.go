@@ -330,7 +330,6 @@ func buildTrackTags(sheet *cue.Sheet, tr cue.Track, title string) map[string]str
 // source audio files that must be hidden from the virtual directory.
 func baseDirState(albums []*Album) *DirState {
 	dirState := &DirState{
-		Albums:          albums,
 		TracksByName:    make(map[string]*VirtualTrack),
 		HiddenMonoliths: make(map[string]bool),
 		Subdirs:         make(map[string]*DirState),
@@ -418,7 +417,6 @@ func attachAlbumSubdirs(dirState *DirState, albums []*Album, realNames map[strin
 		}
 
 		subState := &DirState{
-			Albums:          []*Album{album},
 			HiddenMonoliths: make(map[string]bool),
 			Subdirs:         make(map[string]*DirState),
 			MirroredFiles:   mirrored,

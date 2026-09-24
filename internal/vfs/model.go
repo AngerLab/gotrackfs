@@ -27,8 +27,9 @@ type Album struct {
 
 // DirState holds the virtualized state of a single directory,
 // which can contain 0, 1, or multiple albums (e.g. CD1 + CD2).
+// All fields are the ones the lookup/readdir paths actually consume;
+// album-level metadata lives in the collectAlbums result, not here.
 type DirState struct {
-	Albums          []*Album
 	TracksByName    map[string]*VirtualTrack
 	HiddenMonoliths map[string]bool      // Basenames of monolithic files to hide
 	Subdirs         map[string]*DirState // Virtual subdirectories (e.g. "CD1" -> sub-DirState)

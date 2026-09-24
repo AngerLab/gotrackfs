@@ -65,9 +65,6 @@ FILE "audio.flac" WAVE
 	if state == nil {
 		t.Fatalf("expected non-nil DirState")
 	}
-	if len(state.Albums) != 1 {
-		t.Errorf("expected 1 album, got %d", len(state.Albums))
-	}
 	if len(state.TracksByName) != 2 {
 		t.Errorf("expected 2 tracks, got %d", len(state.TracksByName))
 	}
@@ -113,8 +110,8 @@ FILE "audio.flac" WAVE
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state == nil || len(state.Albums) != 1 {
-		t.Fatalf("expected 1 album, got %+v", state)
+	if state == nil || len(state.TracksByName) != 3 {
+		t.Fatalf("expected 3 tracks, got %+v", state)
 	}
 
 	expectArtist := map[int]string{
@@ -122,7 +119,7 @@ FILE "audio.flac" WAVE
 		2: "Woodkid",      // inherited from album PERFORMER
 		3: "Someone Else", // track-level PERFORMER wins
 	}
-	for _, vt := range state.Albums[0].Tracks {
+	for _, vt := range state.TracksByName {
 		want := expectArtist[vt.Num]
 		if got := vt.Slice.Tags["artist"]; got != want {
 			t.Errorf("track %02d: artist = %q, want %q", vt.Num, got, want)
@@ -241,10 +238,10 @@ FILE "audio.flac" WAVE
 			if err != nil {
 				t.Fatal(err)
 			}
-			if state == nil || len(state.Albums) != 1 {
-				t.Fatalf("expected 1 album, got %v", state)
+			if state == nil || len(state.TracksByName) != 1 {
+				t.Fatalf("expected 1 track, got %v", state)
 			}
-			sl := state.Albums[0].Tracks[0].Slice
+			sl := trackByNum(state, 1).Slice
 			if sl.TargetSampleRate != tt.wantRate || sl.TargetBits != tt.wantBits {
 				t.Errorf("targets = (rate %d, bits %d), want (rate %d, bits %d)",
 					sl.TargetSampleRate, sl.TargetBits, tt.wantRate, tt.wantBits)
@@ -287,7 +284,7 @@ FILE "audio.flac" WAVE
 	if err != nil {
 		t.Fatal(err)
 	}
-	estNoCap := stateNoCap.Albums[0].Tracks[0].EstimatedSize
+	estNoCap := trackByNum(stateNoCap, 1).EstimatedSize
 
 	// 2. With 16-bit / 44.1kHz cap
 	cap16_44 := track.Quality{Bits: 16, SampleRate: 44100}
@@ -295,7 +292,7 @@ FILE "audio.flac" WAVE
 	if err != nil {
 		t.Fatal(err)
 	}
-	estCap := stateCap.Albums[0].Tracks[0].EstimatedSize
+	estCap := trackByNum(stateCap, 1).EstimatedSize
 
 	// Expected ratio is (44100 / 192000) * (16 / 24) = 0.2296875 * 0.666667 = ~0.153125
 	ratio := float64(estCap) / float64(estNoCap)
@@ -417,27 +414,23 @@ FILE "side_b.flac" FLAC
 	if state == nil {
 		t.Fatalf("expected non-nil DirState for multi-file CUE with multi-track files")
 	}
-	if len(state.Albums) != 1 {
-		t.Fatalf("expected 1 album, got %d", len(state.Albums))
-	}
-	album := state.Albums[0]
-	if len(album.Tracks) != 4 {
-		t.Fatalf("expected 4 tracks, got %d", len(album.Tracks))
+	if len(state.TracksByName) != 4 {
+		t.Fatalf("expected 4 tracks, got %d", len(state.TracksByName))
 	}
 
 	// Tracks 1 & 2 should point to side_a.flac
 	for _, num := range []int{1, 2} {
-		tr := album.Tracks[num-1]
-		if tr.Slice.SourceAudioPath != sideAPath {
-			t.Errorf("track %d SourceAudioPath = %s, want %s", num, tr.Slice.SourceAudioPath, sideAPath)
+		tr := trackByNum(state, num)
+		if tr == nil || tr.Slice.SourceAudioPath != sideAPath {
+			t.Errorf("track %d SourceAudioPath = %v, want %s", num, tr, sideAPath)
 		}
 	}
 
 	// Tracks 3 & 4 should point to side_b.flac
 	for _, num := range []int{3, 4} {
-		tr := album.Tracks[num-1]
-		if tr.Slice.SourceAudioPath != sideBPath {
-			t.Errorf("track %d SourceAudioPath = %s, want %s", num, tr.Slice.SourceAudioPath, sideBPath)
+		tr := trackByNum(state, num)
+		if tr == nil || tr.Slice.SourceAudioPath != sideBPath {
+			t.Errorf("track %d SourceAudioPath = %v, want %s", num, tr, sideBPath)
 		}
 	}
 
@@ -449,9 +442,18 @@ FILE "side_b.flac" FLAC
 		t.Errorf("expected side_b.flac to be hidden")
 	}
 
-	// Verify SourceAudioPaths
-	if len(album.SourceAudioPaths) != 2 || album.SourceAudioPaths[0] != sideAPath || album.SourceAudioPaths[1] != sideBPath {
-		t.Errorf("unexpected SourceAudioPaths: %+v", album.SourceAudioPaths)
+	// Verify the set of source audio paths across all tracks. Order and the
+	// album-level SourceAudioPaths list are not part of the DirState contract —
+	// production consumes the paths as a set (HiddenMonoliths) and per-track
+	// (Slice.SourceAudioPath), so that is what the test locks in.
+	sources := map[string]bool{}
+	for num := 1; num <= 4; num++ {
+		if tr := trackByNum(state, num); tr != nil {
+			sources[tr.Slice.SourceAudioPath] = true
+		}
+	}
+	if len(sources) != 2 || !sources[sideAPath] || !sources[sideBPath] {
+		t.Errorf("unexpected source audio paths across tracks: %+v", sources)
 	}
 
 	if facts == nil || facts.dirModTime.IsZero() {
@@ -555,11 +557,11 @@ FILE "side_a.flac" FLAC
 	if state == nil {
 		t.Fatalf("expected non-nil state from valid cue")
 	}
-	if len(state.Albums) != 1 {
-		t.Fatalf("expected exactly 1 album (02_valid.cue), got %d", len(state.Albums))
+	if len(state.TracksByName) != 1 {
+		t.Fatalf("expected exactly 1 virtual track (only 02_valid.cue can build), got %d", len(state.TracksByName))
 	}
-	if state.Albums[0].CuePath != filepath.Join(tmpDir, "02_valid.cue") {
-		t.Errorf("expected 02_valid.cue to succeed, got %s", state.Albums[0].CuePath)
+	if !state.HiddenMonoliths["side_a.flac"] {
+		t.Errorf("expected side_a.flac to be hidden (claimed by 02_valid.cue)")
 	}
 
 	logs := buf.String()
@@ -621,17 +623,15 @@ FILE "side_b.flac" FLAC
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if state == nil || len(state.Albums) != 1 {
-		t.Fatalf("expected 1 album, got: %+v", state)
-	}
-
-	album := state.Albums[0]
-	if len(album.Tracks) != 4 {
-		t.Fatalf("expected 4 tracks, got %d", len(album.Tracks))
+	if state == nil || len(state.TracksByName) != 4 {
+		t.Fatalf("expected 4 tracks, got: %+v", state)
 	}
 
 	// Verify Track 2 (last track of Side A) has End set to probed duration of Side A (100.0s)
-	tr2 := album.Tracks[1]
+	tr2 := trackByNum(state, 2)
+	if tr2 == nil {
+		t.Fatalf("expected track 2, got: %+v", state.TracksByName)
+	}
 	if tr2.Slice.End != 100.0 {
 		t.Errorf("track 2 End = %f, want 100.0 (probed WAV duration)", tr2.Slice.End)
 	}
@@ -643,7 +643,10 @@ FILE "side_b.flac" FLAC
 	}
 
 	// Verify Track 4 (last track of Side B) has End set to probed duration of Side B (200.0s)
-	tr4 := album.Tracks[3]
+	tr4 := trackByNum(state, 4)
+	if tr4 == nil {
+		t.Fatalf("expected track 4, got: %+v", state.TracksByName)
+	}
 	if tr4.Slice.End != 200.0 {
 		t.Errorf("track 4 End = %f, want 200.0 (probed FLAC duration)", tr4.Slice.End)
 	}
@@ -661,4 +664,17 @@ FILE "side_b.flac" FLAC
 	if !state.HiddenMonoliths["side_b.flac"] {
 		t.Errorf("expected side_b.flac to be hidden")
 	}
+}
+
+// trackByNum returns the virtual track with the given track number from the
+// flat track table. TracksByName is a map (lookups in production go by
+// filename), so the tests address tracks by number instead of by index into
+// an unreachable Album.Tracks slice.
+func trackByNum(state *DirState, num int) *VirtualTrack {
+	for _, vt := range state.TracksByName {
+		if vt.Num == num {
+			return vt
+		}
+	}
+	return nil
 }

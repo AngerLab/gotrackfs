@@ -7,7 +7,12 @@ import "strings"
 // case-insensitive (IsAudioExt uses EqualFold), so uppercase variants such
 // as .FLAC need no explicit entries. Resolution priority is not a concern
 // of this package: the resolver's probe order lives in vfs (resolve.go).
-var AudioExtensions = []string{".flac", ".wav", ".ape", ".wv", ".m4a", ".mp3"}
+//
+// .wave is deliberately included: IsWAVExt has always accepted it (the
+// prober parses WAV containers), so membership now matches what the prober
+// handles. On main, .wave files were never resolved as cue sources — the
+// resolver only probes and counts extensions from this list.
+var AudioExtensions = []string{".flac", ".wav", ".wave", ".ape", ".wv", ".m4a", ".mp3"}
 
 // IsAudioExt reports whether ext (e.g. ".Flac") is a recognized audio extension.
 func IsAudioExt(ext string) bool {

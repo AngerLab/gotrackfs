@@ -75,6 +75,56 @@ func TestResolveAudio_ClaimedCandidatesAreSkipped(t *testing.T) {
 	}
 }
 
+// TestResolveAudio_WaveMonolithIsResolved locks the .wave feature: on main a
+// sole album.wave next to album.cue was never probed (the sheet was skipped);
+// now .wave is a first-class stem candidate.
+func TestResolveAudio_WaveMonolithIsResolved(t *testing.T) {
+	m := hostfs.NewMem().AddFile("album.wave", wavBytes())
+
+	got := resolveAudioFileForCue(m, "/", "/album.cue", "album.flac", map[string]bool{})
+	if want := filepath.Join("/", "album.wave"); got != want {
+		t.Errorf("resolveAudioFileForCue = %q, want %q", got, want)
+	}
+}
+
+// TestResolveAudio_WavBeatsWave pins the probe position of .wave: it is
+// tried right after .wav (same container family), so an explicit .wav wins.
+func TestResolveAudio_WavBeatsWave(t *testing.T) {
+	m := hostfs.NewMem().
+		AddFile("album.wav", wavBytes()).
+		AddFile("album.wave", wavBytes())
+
+	got := resolveAudioFileForCue(m, "/", "/album.cue", "album.flac", map[string]bool{})
+	if want := filepath.Join("/", "album.wav"); got != want {
+		t.Errorf("resolveAudioFileForCue = %q, want %q (.wav must beat .wave)", got, want)
+	}
+}
+
+// TestResolveAudio_WaveBeatsApe pins that .wave slots before .ape in the
+// probe order (on main .ape won, because .wave was never tried).
+func TestResolveAudio_WaveBeatsApe(t *testing.T) {
+	m := hostfs.NewMem().
+		AddFile("album.wave", wavBytes()).
+		AddFile("album.ape", nil)
+
+	got := resolveAudioFileForCue(m, "/", "/album.cue", "album.flac", map[string]bool{})
+	if want := filepath.Join("/", "album.wave"); got != want {
+		t.Errorf("resolveAudioFileForCue = %q, want %q (.wave must beat .ape)", got, want)
+	}
+}
+
+// TestResolveAudio_WaveCountsAsUnclaimedAudio locks the step-3 fallback:
+// when neither the declared name nor the cue stem matches anything, a sole
+// .wave file must count as an unclaimed audio candidate (main excluded it).
+func TestResolveAudio_WaveCountsAsUnclaimedAudio(t *testing.T) {
+	m := hostfs.NewMem().AddFile("other.wave", wavBytes())
+
+	got := resolveAudioFileForCue(m, "/", "/album.cue", "", map[string]bool{})
+	if want := filepath.Join("/", "other.wave"); got != want {
+		t.Errorf("resolveAudioFileForCue = %q, want %q (single unclaimed .wave)", got, want)
+	}
+}
+
 // TestFindAllCueFiles lists only non-directory .cue entries.
 func TestFindAllCueFiles(t *testing.T) {
 	m := hostfs.NewMem().

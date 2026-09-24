@@ -26,9 +26,9 @@ func findAllCueFiles(fs hostfs.FS, dir string) ([]string, error) {
 // probeOrder is the sequence in which stem-derived candidates are tried by
 // the resolver: lowercase extensions first (historical priority), then the
 // uppercase literals so that .FLAC/.WAV files resolve on case-sensitive
-// filesystems. Probe order is a resolver concern — the audio package only
-// declares membership.
-var probeOrder = []string{".flac", ".wav", ".ape", ".wv", ".m4a", ".mp3", ".FLAC", ".WAV"}
+// filesystems. .wave joins its WAV sibling right after .wav. Probe order is
+// a resolver concern — the audio package only declares membership.
+var probeOrder = []string{".flac", ".wav", ".wave", ".ape", ".wv", ".m4a", ".mp3", ".FLAC", ".WAV"}
 
 // resolveAudioByStem searches dir for a file named stem + <audio extension>,
 // probing in probeOrder order (lowercase stems first, then .FLAC/.WAV).

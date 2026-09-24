@@ -3,10 +3,11 @@ package audio
 import "strings"
 
 // AudioExtensions is the canonical set of recognized audio container
-// extensions. It is a membership set, kept lowercase because matching is
-// case-insensitive (IsAudioExt uses EqualFold), so uppercase variants such
-// as .FLAC need no explicit entries. Resolution priority is not a concern
-// of this package: the resolver's probe order lives in vfs (resolve.go).
+// extensions, kept lowercase because matching is case-insensitive
+// (IsAudioExt uses EqualFold), so uppercase variants such as .FLAC need no
+// explicit entries. Element order is significant: the vfs resolver derives
+// its probe order from this list (extension order, then the .FLAC/.WAV
+// uppercase variants), so membership changes here propagate to resolution.
 //
 // .wave is deliberately included: IsWAVExt has always accepted it (the
 // prober parses WAV containers), so membership now matches what the prober

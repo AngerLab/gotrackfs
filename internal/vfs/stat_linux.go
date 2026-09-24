@@ -3,7 +3,6 @@
 package vfs
 
 import (
-	"os"
 	"syscall"
 
 	"github.com/winfsp/cgofuse/fuse"
@@ -24,28 +23,6 @@ func copyStat(dst *fuse.Stat_t, src *syscall.Stat_t) {
 	dst.Blocks = int64(src.Blocks)
 }
 
-// copyFileInfoStat fills a fuse.Stat_t from an FS-level FileInfo.
-// Disk-backed infos carry the raw syscall.Stat_t in Sys() — full
-// ino/rdev/ctime fidelity — while MemFS in tests synthesizes a minimal
-// stat from the info fields.
-func copyFileInfoStat(stat *fuse.Stat_t, fi os.FileInfo) {
-	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
-		copyStat(stat, st)
-		return
-	}
-	stat.Ino = 1
-	stat.Nlink = 1
-	stat.Mode = uint32(fi.Mode().Perm())
-	if fi.IsDir() {
-		stat.Mode |= syscall.S_IFDIR
-	} else {
-		stat.Mode |= syscall.S_IFREG
-	}
-	stat.Size = fi.Size()
-	stat.Mtim.Sec = fi.ModTime().Unix()
-}
-
-// fillStatfs fills a statfs struct from raw statfs data (platform-specific).
 func fillStatfs(dst *fuse.Statfs_t, src *syscall.Statfs_t) {
 	dst.Bsize = uint64(src.Bsize)
 	dst.Frsize = uint64(src.Frsize)

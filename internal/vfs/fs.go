@@ -2,9 +2,7 @@ package vfs
 
 import (
 	"context"
-	"errors"
 	"io"
-	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -13,7 +11,6 @@ import (
 	"syscall"
 
 	"github.com/AngerLab/gotrackfs/internal/cutter"
-	"github.com/AngerLab/gotrackfs/internal/hostfs"
 	"github.com/AngerLab/gotrackfs/internal/track"
 
 	"github.com/cespare/xxhash/v2"
@@ -41,20 +38,6 @@ type Options struct {
 	Logger     *slog.Logger              // Optional structured logger. If nil, a default text logger is used.
 	Slicer     *cutter.TrackCacheManager // Optional audio slicer. If nil, virtual track playback is disabled (Open returns ENOSYS).
 
-	// FS backs all filesystem access of the directory-state pipeline:
-	// listing, stat, and file reads for resolution, cue parsing, audio
-	// probing, artwork and serving plain files at runtime. If nil, the
-	// production filesystem is used (real disk with NFC/NFD fallback).
-	// Tests inject hostfs.NewMem() to run the entire build pipeline AND
-	// the runtime read path without a disk.
-	//
-	// The only deliberate exception is the slicer: ffmpeg is an external
-	// binary that needs real on-disk paths (seek-accurate -ss/-to) and
-	// writes decoded hi-res output into a real temp file, so acquisition
-	// goes through cutter.TrackCacheManager. That is a hard external
-	// boundary, not an FS gap.
-	FS hostfs.FS
-
 	// MaxQuality optionally caps the output format of sliced tracks.
 	// Sources strictly above the cap in bit depth or sample rate are lowered
 	// to it; sources at or below the cap keep their original format.
@@ -62,30 +45,14 @@ type Options struct {
 	MaxQuality track.Quality
 }
 
-// defaultFS is the production filesystem: the real disk wrapped with the
-// transparent NFC/NFD fallback. It backs Options.FS when none is injected;
-// hostfs.NewMem() takes its place in tests.
-var defaultFS = hostfs.WithNFDFallback(hostfs.Default())
-
 // EnsureDefaults fills in zero-value fields with production-ready defaults.
 func (o *Options) EnsureDefaults() {
 	if o.Logger == nil {
 		o.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	}
-	if o.FS == nil {
-		o.FS = defaultFS
-	}
 	if abs, err := filepath.Abs(o.SourceRoot); err == nil {
 		o.SourceRoot = abs
 	}
-}
-
-type fileHandle struct {
-	// All access is under v.mu (register/Read/Release/Getattr), so a plain
-	// field suffices; the abstraction is hostfs.File (os.File satisfies it,
-	// as do MemFS handles).
-	file      hostfs.File
-	cutterKey string // non-empty if acquired via cutter
 }
 
 // VFS implements fuse.FileSystemInterface using a path-based routing model.
@@ -94,7 +61,6 @@ type VFS struct {
 	sourceRoot string
 	keepAlbum  bool
 	logger     *slog.Logger
-	fs         hostfs.FS
 	cache      *AlbumCache
 	slicer     *cutter.TrackCacheManager
 	ctx        context.Context
@@ -110,13 +76,12 @@ func New(opts Options) *VFS {
 	opts.EnsureDefaults()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cache := NewAlbumCache(opts.Logger, opts.FS)
+	cache := NewAlbumCache(opts.Logger)
 	cache.maxQuality = opts.MaxQuality
 	return &VFS{
 		sourceRoot: opts.SourceRoot,
 		keepAlbum:  opts.KeepAlbum,
 		logger:     opts.Logger,
-		fs:         opts.FS,
 		cache:      cache,
 		slicer:     opts.Slicer,
 		ctx:        ctx,
@@ -241,22 +206,22 @@ func (v *VFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 
 	case nodeKindVirtualDir:
 		parentRealDir := filepath.Dir(node.realPath)
-		fi, err := v.fs.Lstat(parentRealDir)
-		if err != nil {
+		var st syscall.Stat_t
+		if err := lstatSyscall(parentRealDir, &st); err != nil {
 			return -fuse.ENOENT
 		}
-		copyFileInfoStat(stat, fi)
+		copyStat(stat, &st)
 		stat.Mode = syscall.S_IFDIR | 0555
 		return 0
 
 	case nodeKindTrack:
 		// Virtual track entry
-		fi, err := v.fs.Lstat(node.track.Slice.SourceAudioPath)
-		if err != nil {
+		var st syscall.Stat_t
+		if err := lstatSyscall(node.track.Slice.SourceAudioPath, &st); err != nil {
 			return -fuse.ENOENT
 		}
 
-		copyFileInfoStat(stat, fi)
+		copyStat(stat, &st)
 		size := node.track.EstimatedSize
 
 		// 1. If a valid matching file handle is open, use exact file size from open descriptor
@@ -266,11 +231,9 @@ func (v *VFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 			h, ok := v.openFiles[fh]
 			v.mu.Unlock()
 			if ok && h != nil && h.cutterKey == node.track.CutterKey {
-				if of, isOS := h.file.(*os.File); isOS {
-					if fi, err := of.Stat(); err == nil {
-						size = fi.Size()
-						foundExact = true
-					}
+				if fi, err := h.file.Stat(); err == nil {
+					size = fi.Size()
+					foundExact = true
 				}
 			}
 		}
@@ -293,11 +256,11 @@ func (v *VFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 }
 
 func (v *VFS) statRealPath(realPath string, stat *fuse.Stat_t) int {
-	fi, err := v.fs.Lstat(realPath)
-	if err != nil {
+	var st syscall.Stat_t
+	if err := lstatSyscall(realPath, &st); err != nil {
 		return -fuse.ENOENT
 	}
-	copyFileInfoStat(stat, fi)
+	copyStat(stat, &st)
 	return 0
 }
 
@@ -317,11 +280,11 @@ func (v *VFS) Opendir(path string) (int, uint64) {
 		return -fuse.ENOTDIR, ^uint64(0)
 	}
 
-	fi, err := v.fs.Lstat(node.realPath)
-	if err != nil {
+	var st syscall.Stat_t
+	if err := lstatSyscall(node.realPath, &st); err != nil {
 		return -fuse.ENOENT, ^uint64(0)
 	}
-	if !fi.IsDir() {
+	if (st.Mode & syscall.S_IFMT) != syscall.S_IFDIR {
 		return -fuse.ENOTDIR, ^uint64(0)
 	}
 
@@ -361,7 +324,7 @@ func (v *VFS) Readdir(path string, fill func(name string, stat *fuse.Stat_t, ofs
 	}
 
 	realDir := filepath.Join(v.sourceRoot, cleanPath)
-	entries, err := v.fs.List(realDir)
+	entries, err := readDir(realDir)
 	if err != nil {
 		return -fuse.ENOENT
 	}
@@ -450,22 +413,32 @@ func (v *VFS) openTrack(node resolvedNode) (int, uint64) {
 	return v.registerHandle(f, node.track.CutterKey)
 }
 
-// openReal opens a plain file from the source tree through the injectable
-// FS (defaultFS in production, MemFS in tests), returning ENOENT/EACCES/
-// EISDIR as appropriate. The NFC/NFD retry comes from the FS decorator.
+// openReal opens a plain file from the source tree, returning ENOENT/EACCES/EISDIR as appropriate.
+// The NFC/NFD retry comes from openRealFile's normalization fallback.
 func (v *VFS) openReal(realPath string) (int, uint64) {
-	f, err := v.fs.Open(realPath)
+	f, err := openRealFile(realPath)
 	if err != nil {
-		switch {
-		case errors.Is(err, fs.ErrNotExist):
+		if os.IsNotExist(err) {
 			return -fuse.ENOENT, ^uint64(0)
-		case errors.Is(err, fs.ErrInvalid):
-			return -fuse.EISDIR, ^uint64(0)
-		default:
-			return -fuse.EACCES, ^uint64(0)
 		}
+		return -fuse.EACCES, ^uint64(0)
 	}
+
+	if fi, statErr := f.Stat(); statErr == nil && fi.IsDir() {
+		_ = f.Close()
+		return -fuse.EISDIR, ^uint64(0)
+	}
+
 	return v.registerHandle(f, "")
+}
+
+type fileHandle struct {
+	// file is written exactly once, under v.mu, before the handle is
+	// published in openFiles; Release removes the handle under v.mu and
+	// closes the file. Read serves ReadAt calls after grabbing the handle
+	// from the table, so a released handle can no longer be reached.
+	file      *os.File
+	cutterKey string // non-empty if acquired via cutter
 }
 
 // registerHandle assigns the next handle id to f and stores it in the open-files table.
@@ -473,7 +446,7 @@ func (v *VFS) openReal(realPath string) (int, uint64) {
 // refcount; once the filesystem context is cancelled these are refused with
 // ENODEV and the lease is returned to the slicer. Plain file handles are still
 // registered during shutdown — the handle table remains usable for them.
-func (v *VFS) registerHandle(f hostfs.File, cutterKey string) (int, uint64) {
+func (v *VFS) registerHandle(f *os.File, cutterKey string) (int, uint64) {
 	v.mu.Lock()
 
 	if v.ctx.Err() != nil && cutterKey != "" {

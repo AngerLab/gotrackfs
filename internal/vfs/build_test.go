@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/AngerLab/gotrackfs/internal/audio"
-	"github.com/AngerLab/gotrackfs/internal/hostfs"
 	"github.com/AngerLab/gotrackfs/internal/testutil"
 	"github.com/AngerLab/gotrackfs/internal/track"
 )
@@ -24,7 +23,7 @@ func TestBuildDirState_Pure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	state, facts, err := buildDirState(hostfs.Default(), tmpDir, dirFi, nil, track.Quality{})
+	state, facts, err := buildDirState(tmpDir, dirFi, nil, track.Quality{})
 	if err != nil {
 		t.Fatalf("unexpected error on empty dir: %v", err)
 	}
@@ -58,7 +57,7 @@ FILE "audio.flac" WAVE
 		t.Fatal(err)
 	}
 
-	state, facts, err = buildDirState(hostfs.Default(), tmpDir, dirFi, nil, track.Quality{})
+	state, facts, err = buildDirState(tmpDir, dirFi, nil, track.Quality{})
 	if err != nil {
 		t.Fatalf("unexpected error building state: %v", err)
 	}
@@ -106,7 +105,7 @@ FILE "audio.flac" WAVE
 		t.Fatal(err)
 	}
 
-	state, _, err := buildDirState(hostfs.Default(), tmpDir, dirFi, nil, track.Quality{})
+	state, _, err := buildDirState(tmpDir, dirFi, nil, track.Quality{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +165,7 @@ FILE "nonexistent.flac" WAVE
 		t.Fatal(err)
 	}
 
-	state, _, err := buildDirState(hostfs.Default(), tmpDir, dirFi, logger, track.Quality{})
+	state, _, err := buildDirState(tmpDir, dirFi, logger, track.Quality{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -234,7 +233,7 @@ FILE "audio.flac" WAVE
 			if err != nil {
 				t.Fatal(err)
 			}
-			state, _, err := buildDirState(hostfs.Default(), tmpDir, dirFi, nil, tt.cap)
+			state, _, err := buildDirState(tmpDir, dirFi, nil, tt.cap)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -280,7 +279,7 @@ FILE "audio.flac" WAVE
 	}
 
 	// 1. Without cap
-	stateNoCap, _, err := buildDirState(hostfs.Default(), tmpDir, dirFi, nil, track.Quality{})
+	stateNoCap, _, err := buildDirState(tmpDir, dirFi, nil, track.Quality{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +287,7 @@ FILE "audio.flac" WAVE
 
 	// 2. With 16-bit / 44.1kHz cap
 	cap16_44 := track.Quality{Bits: 16, SampleRate: 44100}
-	stateCap, _, err := buildDirState(hostfs.Default(), tmpDir, dirFi, nil, cap16_44)
+	stateCap, _, err := buildDirState(tmpDir, dirFi, nil, cap16_44)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -357,7 +356,7 @@ FILE "audio` + ext + `" WAVE
 				t.Fatal(err)
 			}
 
-			state, _, err := buildDirState(hostfs.Default(), tmpDir, dirFi, nil, track.Quality{})
+			state, _, err := buildDirState(tmpDir, dirFi, nil, track.Quality{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -407,7 +406,7 @@ FILE "side_b.flac" FLAC
 		t.Fatal(err)
 	}
 
-	state, facts, err := buildDirState(hostfs.Default(), tmpDir, dirFi, nil, track.Quality{})
+	state, facts, err := buildDirState(tmpDir, dirFi, nil, track.Quality{})
 	if err != nil {
 		t.Fatalf("unexpected error building state: %v", err)
 	}
@@ -491,7 +490,7 @@ FILE "track02.flac" WAVE
 		t.Fatal(err)
 	}
 
-	state, facts, err := buildDirState(hostfs.Default(), tmpDir, dirFi, nil, track.Quality{})
+	state, facts, err := buildDirState(tmpDir, dirFi, nil, track.Quality{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -550,7 +549,7 @@ FILE "side_a.flac" FLAC
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	state, _, err := buildDirState(hostfs.Default(), tmpDir, dirFi, logger, track.Quality{})
+	state, _, err := buildDirState(tmpDir, dirFi, logger, track.Quality{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -619,7 +618,7 @@ FILE "side_b.flac" FLAC
 
 	// Cap to 44.1kHz / 16-bit
 	cap16_44 := track.Quality{Bits: 16, SampleRate: 44100}
-	state, _, err := buildDirState(hostfs.Default(), tmpDir, dirFi, nil, cap16_44)
+	state, _, err := buildDirState(tmpDir, dirFi, nil, cap16_44)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -670,40 +669,42 @@ FILE "side_b.flac" FLAC
 // in case from the on-disk name get rewritten to the on-disk name, exact
 // matches stay untouched, and track slices follow the album-level paths.
 func TestRealignSourcePathCase(t *testing.T) {
-	m := hostfs.NewMem().
-		AddFile("/ALBUM.FLAC", nil).
-		AddFile("/album.cue", nil).
-		AddFile("/other.flac", nil)
+	tmpDir := t.TempDir()
+	for _, name := range []string{"ALBUM.FLAC", "album.cue", "other.flac"} {
+		if err := os.WriteFile(filepath.Join(tmpDir, name), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	albums := []*Album{
 		{
 			// "album.flac" probe literal, on disk it is "ALBUM.FLAC".
-			SourceAudioPaths: []string{"/album.flac"},
+			SourceAudioPaths: []string{filepath.Join(tmpDir, "album.flac")},
 			Tracks: []VirtualTrack{
-				{Slice: track.Slice{SourceAudioPath: "/album.flac"}},
-				{Slice: track.Slice{SourceAudioPath: "/ALBUM.FLAC"}}, // already on-disk
+				{Slice: track.Slice{SourceAudioPath: filepath.Join(tmpDir, "album.flac")}},
+				{Slice: track.Slice{SourceAudioPath: filepath.Join(tmpDir, "ALBUM.FLAC")}}, // already on-disk
 			},
 		},
 		{
 			// Exact match: must be a no-op.
-			SourceAudioPaths: []string{"/other.flac"},
-			Tracks:           []VirtualTrack{{Slice: track.Slice{SourceAudioPath: "/other.flac"}}},
+			SourceAudioPaths: []string{filepath.Join(tmpDir, "other.flac")},
+			Tracks:           []VirtualTrack{{Slice: track.Slice{SourceAudioPath: filepath.Join(tmpDir, "other.flac")}}},
 		},
 	}
 
-	(&albumBuilder{fs: m, dirPath: "/"}).realignSourcePathCase(albums)
+	(&albumBuilder{dirPath: tmpDir}).realignSourcePathCase(albums)
 
-	if got := albums[0].SourceAudioPaths[0]; got != "/ALBUM.FLAC" {
-		t.Errorf("SourceAudioPaths[0] = %q, want %q (realigned to on-disk name)", got, "/ALBUM.FLAC")
+	if got := albums[0].SourceAudioPaths[0]; got != filepath.Join(tmpDir, "ALBUM.FLAC") {
+		t.Errorf("SourceAudioPaths[0] = %q, want %q (realigned to on-disk name)", got, filepath.Join(tmpDir, "ALBUM.FLAC"))
 	}
-	if got := albums[0].Tracks[0].Slice.SourceAudioPath; got != "/ALBUM.FLAC" {
-		t.Errorf("Tracks[0] source = %q, want %q", got, "/ALBUM.FLAC")
+	if got := albums[0].Tracks[0].Slice.SourceAudioPath; got != filepath.Join(tmpDir, "ALBUM.FLAC") {
+		t.Errorf("Tracks[0] source = %q, want %q", got, filepath.Join(tmpDir, "ALBUM.FLAC"))
 	}
-	if got := albums[0].Tracks[1].Slice.SourceAudioPath; got != "/ALBUM.FLAC" {
-		t.Errorf("Tracks[1] source = %q, want %q (exact on-disk name untouched)", got, "/ALBUM.FLAC")
+	if got := albums[0].Tracks[1].Slice.SourceAudioPath; got != filepath.Join(tmpDir, "ALBUM.FLAC") {
+		t.Errorf("Tracks[1] source = %q, want %q (exact on-disk name untouched)", got, filepath.Join(tmpDir, "ALBUM.FLAC"))
 	}
-	if got := albums[1].SourceAudioPaths[0]; got != "/other.flac" {
-		t.Errorf("exact-match source = %q, want %q (no-op)", got, "/other.flac")
+	if got := albums[1].SourceAudioPaths[0]; got != filepath.Join(tmpDir, "other.flac") {
+		t.Errorf("exact-match source = %q, want %q (no-op)", got, filepath.Join(tmpDir, "other.flac"))
 	}
 }
 
@@ -733,7 +734,7 @@ FILE "album.flac" WAVE
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, _, err := buildDirState(hostfs.Default(), tmpDir, dirFi, nil, track.Quality{})
+	state, _, err := buildDirState(tmpDir, dirFi, nil, track.Quality{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -764,29 +765,33 @@ FILE "album.flac" WAVE
 	}
 }
 
-// TestBuildDirState_WithoutDisk drives the entire build pipeline against
-// MemFS: cue parsing, audio probing, size estimation, monolith hiding and
-// artwork mirroring all run without touching the real filesystem. Before
-// the hostfs read migration this could not work — cue.ParseFile and the
-// prober opened paths on the real disk, so a MemFS build silently returned
-// an empty state ("skipping invalid cue file" for ENOENT).
-func TestBuildDirState_WithoutDisk(t *testing.T) {
+// TestBuildDirState_DiskPipeline drives the entire build pipeline against a
+// real temporary directory: cue parsing, audio probing, size estimation,
+// monolith hiding and artwork mirroring all run end-to-end on the disk the
+// way the production mount does.
+func TestBuildDirState_DiskPipeline(t *testing.T) {
 	cueContent := `TITLE "Test Album"
 PERFORMER "Test Artist"
 FILE "audio.flac" WAVE
   TRACK 01 AUDIO
     TITLE "Track 1"
     INDEX 01 00:00:00`
-	m := hostfs.NewMem().
-		AddFile("/album/album.cue", []byte(cueContent)).
-		AddFile("/album/audio.flac", makeFlacHeader(44100, 2, 16)).
-		AddFile("/album/cover.jpg", []byte("fake-jpeg"))
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "album.cue"), []byte(cueContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "audio.flac"), makeFlacHeader(44100, 2, 16), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "cover.jpg"), []byte("fake-jpeg"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
-	dirFi, err := m.Stat("/album")
+	dirFi, err := os.Stat(tmpDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, facts, err := buildDirState(m, "/album", dirFi, nil, track.Quality{})
+	state, facts, err := buildDirState(tmpDir, dirFi, nil, track.Quality{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -798,14 +803,16 @@ FILE "audio.flac" WAVE
 	}
 	for _, vt := range state.TracksByName {
 		if vt.EstimatedSize <= 0 {
-			t.Errorf("track %q EstimatedSize = %d, want > 0 (probe must run in-memory)", vt.FileName, vt.EstimatedSize)
+			t.Errorf("track %q EstimatedSize = %d, want > 0 (probe must run on disk)", vt.FileName, vt.EstimatedSize)
 		}
-		if vt.Slice.SourceAudioPath != "/album/audio.flac" {
-			t.Errorf("source = %q, want %q", vt.Slice.SourceAudioPath, "/album/audio.flac")
+		wantSrc := filepath.Join(tmpDir, "audio.flac")
+		if vt.Slice.SourceAudioPath != wantSrc {
+			t.Errorf("source = %q, want %q", vt.Slice.SourceAudioPath, wantSrc)
 		}
 		// Flat layout embeds artwork into tracks rather than mirroring it.
-		if vt.Slice.ArtworkPath != "/album/cover.jpg" {
-			t.Errorf("artwork = %q, want %q (artwork lookup must run in-memory)", vt.Slice.ArtworkPath, "/album/cover.jpg")
+		wantArt := filepath.Join(tmpDir, "cover.jpg")
+		if vt.Slice.ArtworkPath != wantArt {
+			t.Errorf("artwork = %q, want %q (artwork lookup must run on disk)", vt.Slice.ArtworkPath, wantArt)
 		}
 	}
 	if !state.HiddenMonoliths["audio.flac"] {
@@ -857,7 +864,7 @@ func TestBuildDirState_MultiAlbumSubdirCollisionSuffixesWholeName(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, _, err := buildDirState(hostfs.Default(), tmpDir, dirFi, nil, track.Quality{})
+	state, _, err := buildDirState(tmpDir, dirFi, nil, track.Quality{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -4,9 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
-
-	"github.com/AngerLab/gotrackfs/internal/hostfs"
 )
 
 // ErrNotSupported is returned when the audio format is not supported or duration cannot be determined.
@@ -32,23 +31,27 @@ type Info struct {
 // If the container is not FLAC/WAV, direct header parsing fails, or WAV duration cannot be determined,
 // it falls back to ffprobe. On total failure, it wraps ErrNotSupported with underlying diagnostic causes.
 func Probe(filePath string) (Info, error) {
-	return ProbeFS(hostfs.Default(), filePath)
-}
+	ext := filepath.Ext(filePath)
+	var directErr error
 
-// ProbeFS is Probe against an injected filesystem: container headers are read
-// through fs (MemFS in tests) so the whole build pipeline can run without a
-// disk. The ffprobe fallback still executes against the real path and
-// therefore cannot help on MemFS — direct header parsing covers FLAC/WAV.
-func ProbeFS(fs hostfs.FS, filePath string) (Info, error) {
-	f, err := fs.Open(filePath)
-	if err != nil {
-		return Info{}, fmt.Errorf("probe: open %s: %w", filePath, err)
-	}
-	defer f.Close()
-
-	info, directErr := probeDirect(f, filepath.Ext(filePath))
-	if directErr == nil {
-		return info, nil
+	// Direct header parsing covers FLAC and WAV only; other containers go
+	// straight to ffprobe without opening the file. An open failure is not
+	// fatal either: it is recorded as the direct error, ffprobe still gets
+	// its turn, and only a total failure surfaces as ErrNotSupported.
+	if IsFLACExt(ext) || IsWAVExt(ext) {
+		f, err := os.Open(filePath)
+		if err != nil {
+			directErr = fmt.Errorf("probe: open %s: %w", filePath, err)
+		} else {
+			info, probeErr := probeDirect(f, ext)
+			_ = f.Close()
+			if probeErr == nil {
+				return info, nil
+			}
+			directErr = probeErr
+		}
+	} else {
+		directErr = fmt.Errorf("unsupported container extension %q", ext)
 	}
 
 	ffprobeInfo, ffprobeErr := probeWithFFprobe(filePath)
@@ -61,7 +64,7 @@ func ProbeFS(fs hostfs.FS, filePath string) (Info, error) {
 
 // probeDirect parses container headers from r. It covers FLAC and WAV in
 // pure Go; everything else is unsupported here and left to the ffprobe
-// fallback in ProbeFS.
+// fallback in Probe.
 func probeDirect(r io.ReadSeeker, ext string) (Info, error) {
 	switch {
 	case IsFLACExt(ext):

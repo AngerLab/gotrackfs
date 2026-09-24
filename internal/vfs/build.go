@@ -11,7 +11,6 @@ import (
 
 	"github.com/AngerLab/gotrackfs/internal/audio"
 	"github.com/AngerLab/gotrackfs/internal/cue"
-	"github.com/AngerLab/gotrackfs/internal/hostfs"
 	"github.com/AngerLab/gotrackfs/internal/track"
 
 	"golang.org/x/text/unicode/norm"
@@ -43,26 +42,25 @@ type dirFacts struct {
 // and computes the DirState along with dirFacts for caching.
 // maxQuality optionally caps the sliced-track output format (zero = keep source).
 // albumBuilder carries the cross-cutting state of one directory build: the
-// filesystem, the directory being built, logging, the quality cap, and the
-// audio-claim ledger shared by every cue sheet in that directory. Making
-// these fields instead of parameters is what keeps the per-file functions
-// small — virtualTracksForFile used to take nine arguments, and every new
-// cross-cutting concern (fs before it, ctx next) would have grown every
-// signature in the chain.
+// directory being built, logging, the quality cap, and the audio-claim
+// ledger shared by every cue sheet in that directory. Making these fields
+// instead of parameters is what keeps the per-file functions small —
+// virtualTracksForFile used to take nine arguments, and every new
+// cross-cutting concern (ctx next) would have grown every signature in
+// the chain.
 type albumBuilder struct {
-	fs            hostfs.FS
 	dirPath       string
 	logger        *slog.Logger
 	maxQuality    track.Quality
 	claimedAudios map[string]bool // resolved source paths claimed by earlier cue sheets
 }
 
-func buildDirState(fs hostfs.FS, dirPath string, dirFi os.FileInfo, logger *slog.Logger, maxQuality track.Quality) (*DirState, *dirFacts, error) {
+func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger, maxQuality track.Quality) (*DirState, *dirFacts, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
 
-	cueFiles, err := findAllCueFiles(fs, dirPath)
+	cueFiles, err := findAllCueFiles(dirPath)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -72,7 +70,7 @@ func buildDirState(fs hostfs.FS, dirPath string, dirFi os.FileInfo, logger *slog
 		return nil, facts, nil
 	}
 
-	b := albumBuilder{fs: fs, dirPath: dirPath, logger: logger, maxQuality: maxQuality, claimedAudios: make(map[string]bool)}
+	b := albumBuilder{dirPath: dirPath, logger: logger, maxQuality: maxQuality, claimedAudios: make(map[string]bool)}
 	albums := b.collectAlbums(cueFiles)
 	if len(albums) == 0 {
 		return nil, facts, nil
@@ -80,8 +78,8 @@ func buildDirState(fs hostfs.FS, dirPath string, dirFi os.FileInfo, logger *slog
 	b.realignSourcePathCase(albums)
 
 	dirState := baseDirState(albums)
-	realNames, artwork := scanDirEntries(fs, dirPath)
-	assignArtwork(fs, albums, findPrimaryArtwork(artwork))
+	realNames, artwork := scanDirEntries(dirPath)
+	assignArtwork(albums, findPrimaryArtwork(artwork))
 	// Cutter keys must be computed after artwork: Slice.Key() hashes ArtworkPath.
 	finalizeTrackCutterKeys(albums)
 
@@ -114,21 +112,10 @@ func (b *albumBuilder) collectAlbums(cueFiles []string) []*Album {
 	return albums
 }
 
-// parseCueFile reads and parses a CUE sheet through fs so the whole build
-// pipeline can run against MemFS in tests.
-func parseCueFile(fs hostfs.FS, cuePath string) (*cue.Sheet, error) {
-	f, err := fs.Open(cuePath)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	return cue.Parse(f)
-}
-
 // buildAlbumFromCue parses one CUE sheet and materializes its virtual tracks.
 // skip is true when the sheet must be ignored (unparseable, empty, or already split).
 func (b *albumBuilder) buildAlbumFromCue(cuePath string) (*Album, bool) {
-	sheet, err := parseCueFile(b.fs, cuePath)
+	sheet, err := cue.ParseFile(cuePath)
 	if err != nil {
 		b.logger.Warn("vfs: skipping invalid cue file", "path", cuePath, "error", err)
 		return nil, true
@@ -187,13 +174,13 @@ func (b *albumBuilder) virtualTracksForFile(sheet *cue.Sheet, f *cue.File, cuePa
 		b.logger.Warn("vfs: audio file not found for cue", "cue", cuePath, "declared", f.Name)
 		return nil, "", false
 	}
-	audioFi, err := b.fs.Stat(audioPath)
+	audioFi, err := statPath(audioPath)
 	if err != nil {
 		b.logger.Warn("vfs: cannot stat audio file for cue", "cue", cuePath, "audio", audioPath, "error", err)
 		return nil, "", false
 	}
 
-	audioInfo, probeErr := audio.ProbeFS(b.fs, audioPath)
+	audioInfo, probeErr := audio.Probe(audioPath)
 	if probeErr != nil {
 		b.logger.Debug("vfs: failed to probe audio file", "audio", audioPath, "error", probeErr)
 	}
@@ -367,7 +354,7 @@ func buildTrackTags(sheet *cue.Sheet, tr cue.Track, title string) map[string]str
 // the folded variant of a hidden monolith will still see the real file.
 // Making lookup host-case-aware is a separate change.
 func (b *albumBuilder) realignSourcePathCase(albums []*Album) {
-	entries, err := b.fs.List(b.dirPath)
+	entries, err := readDir(b.dirPath)
 	if err != nil {
 		if b.logger != nil {
 			b.logger.Warn("vfs: cannot list dir to realign source path case", "dir", b.dirPath, "error", err)
@@ -427,10 +414,10 @@ func baseDirState(albums []*Album) *DirState {
 	return dirState
 }
 
-// scanDirEntries lists the directory once through fs and classifies entries
-// into occupied names (for collision avoidance) and artwork candidates.
-func scanDirEntries(fs hostfs.FS, dirPath string) (realNames map[string]bool, artwork map[string]string) {
-	rawEntries, err := fs.List(dirPath)
+// scanDirEntries lists the directory once and classifies entries into
+// occupied names (for collision avoidance) and artwork candidates.
+func scanDirEntries(dirPath string) (realNames map[string]bool, artwork map[string]string) {
+	rawEntries, err := readDir(dirPath)
 	if err != nil {
 		rawEntries = nil
 	}
@@ -452,10 +439,10 @@ func scanDirEntries(fs hostfs.FS, dirPath string) (realNames map[string]bool, ar
 
 // assignArtwork attaches the primary cover art to every virtual track and
 // accounts for its size in the pre-slice estimates.
-func assignArtwork(fs hostfs.FS, albums []*Album, artworkPath string) {
+func assignArtwork(albums []*Album, artworkPath string) {
 	var artworkSize int64
 	if artworkPath != "" {
-		if artFi, err := fs.Stat(artworkPath); err == nil {
+		if artFi, err := os.Stat(artworkPath); err == nil {
 			artworkSize = artFi.Size()
 		}
 	}

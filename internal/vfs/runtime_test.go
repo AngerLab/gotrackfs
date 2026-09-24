@@ -1,23 +1,27 @@
 package vfs
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
-
-	"github.com/AngerLab/gotrackfs/internal/hostfs"
 
 	"github.com/winfsp/cgofuse/fuse"
 	"golang.org/x/text/unicode/norm"
 )
 
-// The runtime read path is FS-injectable: openReal goes through Options.FS,
-// so MemFS exercises serving plain files exactly like the disk would.
+// Runtime read-path tests run against real temp files: openReal serves the
+// handle table on the disk, exactly like a production mount.
 
-func TestOpenReal_ServesPlainFileFromInjectedFS(t *testing.T) {
-	mem := hostfs.NewMem().AddFile("cover.jpg", []byte("jpeg-bytes"))
-	v := New(Options{FS: mem})
+func TestOpenReal_ServesPlainFile(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "cover.jpg")
+	if err := os.WriteFile(src, []byte("jpeg-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	v := New(Options{})
 	defer v.Destroy()
 
-	rc, fh := v.openReal("/cover.jpg")
+	rc, fh := v.openReal(src)
 	if rc != 0 {
 		t.Fatalf("openReal rc = %d, want 0", rc)
 	}
@@ -42,31 +46,49 @@ func TestOpenReal_ServesPlainFileFromInjectedFS(t *testing.T) {
 }
 
 func TestOpenReal_ErrorMapping(t *testing.T) {
-	mem := hostfs.NewMem().AddDir("dir").AddFile("f.bin", nil)
-	v := New(Options{FS: mem})
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "dir")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "f.bin"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	v := New(Options{})
 	defer v.Destroy()
 
-	if rc, _ := v.openReal("/nope"); rc != -fuse.ENOENT {
+	if rc, _ := v.openReal(filepath.Join(dir, "nope")); rc != -fuse.ENOENT {
 		t.Errorf("missing file rc = %d, want ENOENT", rc)
 	}
-	if rc, _ := v.openReal("/dir"); rc != -fuse.EISDIR {
+	if rc, _ := v.openReal(sub); rc != -fuse.EISDIR {
 		t.Errorf("directory rc = %d, want EISDIR", rc)
 	}
-	if rc, _ := v.openReal("/f.bin"); rc != 0 {
+	if rc, _ := v.openReal(filepath.Join(dir, "f.bin")); rc != 0 {
 		t.Errorf("plain file rc = %d, want 0", rc)
 	}
 }
 
 // TestOpenReal_NFDFallback pins that runtime serving inherits the NFC/NFD
-// retry from the FS decorator (previously duplicated in openRealFile).
+// retry from openRealFile: a file stored under an NFD name is found through
+// an NFC query. Byte-exact hosts (Linux ext4, NFS) exercise the retry;
+// normalization-insensitive hosts (APFS) skip — there is nothing to prove.
 func TestOpenReal_NFDFallback(t *testing.T) {
-	mem := hostfs.NewMem().AddFile(norm.NFD.String("Épisode 1/flac"), []byte("audio"))
-	v := New(Options{FS: hostfs.WithNFDFallback(mem)})
+	dir := t.TempDir()
+	path := filepath.Join(dir, norm.NFD.String("Épisode 1.flac"))
+	if err := os.WriteFile(path, []byte("audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nfcPath := filepath.Join(dir, norm.NFC.String("Épisode 1.flac"))
+	if _, err := os.Stat(nfcPath); err == nil {
+		t.Skip("host filesystem is normalization-insensitive; nothing to prove")
+	}
+
+	v := New(Options{})
 	defer v.Destroy()
 
-	rc, fh := v.openReal(norm.NFC.String("Épisode 1") + "/flac")
+	rc, fh := v.openReal(nfcPath)
 	if rc != 0 {
-		t.Fatalf("openReal(NFC query) rc = %d, want 0 via NFD retry", rc)
+		t.Fatalf("openReal(nfc query) rc = %d, want 0 via NFD retry", rc)
 	}
 	defer v.Release("", fh)
 

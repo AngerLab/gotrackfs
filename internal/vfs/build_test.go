@@ -678,3 +678,57 @@ func trackByNum(state *DirState, num int) *VirtualTrack {
 	}
 	return nil
 }
+
+// TestBuildDirState_MultiAlbumSubdirCollisionSuffixesWholeName locks the
+// virtual-subdirectory collision scheme: a second album with the same
+// fractional disc number must get a whole-name suffix ("CD1.5 (2)"), not an
+// extension-split one ("CD1 (2).5").
+func TestBuildDirState_MultiAlbumSubdirCollisionSuffixesWholeName(t *testing.T) {
+	tmpDir := t.TempDir()
+	mkAlbum := func(name, file, disc string) {
+		cue := "REM DISCNUMBER " + disc + "\n" +
+			"TITLE \"Album " + name + "\"\n" +
+			"PERFORMER \"Artist\"\n" +
+			"FILE \"" + file + "\" WAVE\n" +
+			"  TRACK 01 AUDIO\n" +
+			"    TITLE \"Track " + name + "\"\n" +
+			"    INDEX 01 00:00:00\n"
+		if err := os.WriteFile(filepath.Join(tmpDir, name+".cue"), []byte(cue), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmpDir, file), make([]byte, 1024*1024), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mkAlbum("side_a", "a.flac", "1.5")
+	mkAlbum("side_b", "b.flac", "1.5")
+
+	dirFi, err := os.Stat(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, _, err := buildDirState(hostfs.Default(), tmpDir, dirFi, nil, track.Quality{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if state == nil {
+		t.Fatal("expected non-nil DirState")
+	}
+	if len(state.TracksByName) != 0 {
+		t.Errorf("expected flat TracksByName to be empty (multi-album => subdirs), got %d", len(state.TracksByName))
+	}
+	if len(state.Subdirs) != 2 {
+		t.Fatalf("expected 2 subdirs, got %d", len(state.Subdirs))
+	}
+	first := state.Subdirs["CD1.5"]
+	if first == nil || len(first.TracksByName) != 1 {
+		t.Errorf("CD1.5 subdir missing or wrong track count: %+v", first)
+	}
+	second := state.Subdirs["CD1.5 (2)"]
+	if second == nil || len(second.TracksByName) != 1 {
+		t.Errorf("CD1.5 (2) subdir missing or wrong track count: %+v", second)
+	}
+	if !state.HiddenMonoliths["a.flac"] || !state.HiddenMonoliths["b.flac"] {
+		t.Errorf("expected both monoliths hidden, got %v", state.HiddenMonoliths)
+	}
+}

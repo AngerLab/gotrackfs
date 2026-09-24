@@ -166,7 +166,7 @@ func TestFindAllCueFiles(t *testing.T) {
 // about existence, not audio validity).
 func wavBytes() []byte { return []byte("RIFF....WAVEfmt ") }
 
-// TestResolveAudio_HostFSCaseSemantics pins resolveAudioFileForCue against a
+// TestResolveAudio_CaseSemantics pins resolveAudioFileForCue against a
 // REAL host filesystem, whatever its case behavior is:
 //
 //   - case-sensitive host (Linux ext4): probe order is honored — album.wav
@@ -179,10 +179,9 @@ func wavBytes() []byte { return []byte("RIFF....WAVEfmt ") }
 //
 // //
 // The probe-order contract therefore holds only on case-sensitive
-// filesystems; production on macOS inherits the host's folding. This is the
-// exact scenario that used to leak as an APFS-only bug, and it must keep
-// passing on both Mac and Linux.
-func TestResolveAudio_HostFSCaseSemantics(t *testing.T) {
+// filesystems; production on macOS inherits the host's folding. The test
+// runs against the real filesystem and must pass on both Mac and Linux.
+func TestResolveAudio_CaseSemantics(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFiles(t, dir, "album.wav", "album.FLAC")
 

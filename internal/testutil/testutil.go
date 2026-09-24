@@ -1,8 +1,8 @@
 // Package testutil provides shared test fixtures for audio container headers.
 //
-// The FLAC/WAV builders used to be copy-pasted across the audio, vfs, and
-// cutter test suites; keeping them here gives the test code a single source
-// of truth for synthetic container fixtures.
+// The FLAC/WAV builders used to be copy-pasted across the audio and vfs
+// test suites (cutter fixtures never used them); keeping them here gives
+// the test code a single source of truth for synthetic container fixtures.
 package testutil
 
 import (

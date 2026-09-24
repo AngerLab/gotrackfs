@@ -187,15 +187,6 @@ FILE "nonexistent.flac" WAVE
 	}
 }
 
-// makeFlacHeader builds a minimal file with a valid FLAC STREAMINFO block.
-func makeFlacHeader(rate, chans, bps uint64) []byte {
-	return makeFlacHeaderWithSamples(rate, chans, bps, 1000)
-}
-
-func makeFlacHeaderWithSamples(rate, chans, bps, totalSamples uint64) []byte {
-	return testutil.FlacHeaderWithSamples(rate, chans, bps, totalSamples)
-}
-
 func TestBuildDirState_QualityCap(t *testing.T) {
 	cueContent := `TITLE "Test Album"
 FILE "audio.flac" WAVE
@@ -223,7 +214,7 @@ FILE "audio.flac" WAVE
 			if err := os.WriteFile(filepath.Join(tmpDir, "album.cue"), []byte(cueContent), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			audio := makeFlacHeader(tt.srcRate, 2, tt.srcBits)
+			audio := testutil.FlacHeader(tt.srcRate, 2, tt.srcBits)
 			if tt.srcRate == 0 {
 				audio = []byte("junk not a flac at all")
 			}
@@ -268,7 +259,7 @@ FILE "audio.flac" WAVE
 
 	// 20MB dummy audio file with 192kHz / 24-bit FLAC header, 120s duration
 	totalSamples := uint64(120 * 192000)
-	header := makeFlacHeaderWithSamples(192000, 2, 24, totalSamples)
+	header := testutil.FlacHeaderWithSamples(192000, 2, 24, totalSamples)
 
 	audio := append(header, make([]byte, 20*1024*1024-len(header))...)
 	if err := os.WriteFile(filepath.Join(tmpDir, "audio.flac"), audio, 0o644); err != nil {
@@ -571,10 +562,6 @@ FILE "side_a.flac" FLAC
 	}
 }
 
-func makeWavHeader(rate, chans, bps uint32, durationSec float64) []byte {
-	return testutil.WavHeader(rate, chans, bps, durationSec)
-}
-
 func TestBuildDirState_MultiFileCue_ProbedDurationAndMixedQuality(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -600,14 +587,14 @@ FILE "side_b.flac" FLAC
 	}
 
 	// Side A: 48kHz, 2 channels, 24-bit WAV, 100 seconds duration
-	sideAWav := makeWavHeader(48000, 2, 24, 100.0)
+	sideAWav := testutil.WavHeader(48000, 2, 24, 100.0)
 	sideAPath := filepath.Join(tmpDir, "side_a.wav")
 	if err := os.WriteFile(sideAPath, sideAWav, 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	// Side B: 96kHz, 2 channels, 24-bit FLAC, 200 seconds duration (96000 * 200 samples)
-	sideBFlac := makeFlacHeaderWithSamples(96000, 2, 24, 96000*200)
+	sideBFlac := testutil.FlacHeaderWithSamples(96000, 2, 24, 96000*200)
 	sideBPath := filepath.Join(tmpDir, "side_b.flac")
 	if err := os.WriteFile(sideBPath, sideBFlac, 0644); err != nil {
 		t.Fatal(err)
@@ -722,7 +709,7 @@ func TestRealignSourcePathCase_NFDPreservedByteExact(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	nfdName := norm.NFD.String("Épisode 1") + ".flac"
-	if err := os.WriteFile(filepath.Join(tmpDir, nfdName), makeFlacHeader(44100, 2, 16), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(tmpDir, nfdName), testutil.FlacHeader(44100, 2, 16), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cueContent := `TITLE "NFD Album"
@@ -831,7 +818,7 @@ FILE "audio.flac" WAVE
 	if err := os.WriteFile(filepath.Join(tmpDir, "album.cue"), []byte(cueContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(tmpDir, "audio.flac"), makeFlacHeader(44100, 2, 16), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(tmpDir, "audio.flac"), testutil.FlacHeader(44100, 2, 16), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(tmpDir, "cover.jpg"), []byte("fake-jpeg"), 0o644); err != nil {

@@ -144,15 +144,10 @@ func TestProbe_MalformedWAVMissingFmt(t *testing.T) {
 	tmpDir := t.TempDir()
 	wavPath := filepath.Join(tmpDir, "bad.wav")
 
-	var buf bytes.Buffer
-	buf.WriteString("RIFF")
-	binary.Write(&buf, binary.LittleEndian, uint32(12))
-	buf.WriteString("WAVE")
-	buf.WriteString("JUNK")
-	binary.Write(&buf, binary.LittleEndian, uint32(4))
-	buf.WriteString("1234")
-
-	if err := os.WriteFile(wavPath, buf.Bytes(), 0o644); err != nil {
+	// Canonical WAV header with the fmt chunk id clobbered: the parser must
+	// reject a stream whose format chunk is missing.
+	junk := bytes.Replace(testutil.WavHeader(44100, 2, 16, 1), []byte("fmt "), []byte("JUNK"), 1)
+	if err := os.WriteFile(wavPath, junk, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -351,6 +346,9 @@ func TestProbe_WAVOddFmtChunkPadding(t *testing.T) {
 	tmpDir := t.TempDir()
 	wavPath := filepath.Join(tmpDir, "odd_fmt.wav")
 
+	// Hand-rolled on purpose: the fmt chunk is 17 bytes (odd), which the
+	// canonical testutil.WavHeader cannot express — this case pins the
+	// padding-skip logic in the parser.
 	// RIFF header
 	// fmt chunk: 17 bytes (odd!), so there is 1 byte padding after fmt chunk
 	// data chunk: 8 bytes
@@ -510,22 +508,10 @@ func TestProbe_FFprobeRunnerMock(t *testing.T) {
 			}`), nil
 		}
 
-		// Valid RIFF WAVE header and fmt chunk, but NO data chunk (DataSize == 0)
-		var buf bytes.Buffer
-		buf.WriteString("RIFF")
-		binary.Write(&buf, binary.LittleEndian, uint32(36))
-		buf.WriteString("WAVE")
-		buf.WriteString("fmt ")
-		binary.Write(&buf, binary.LittleEndian, uint32(16))
-		binary.Write(&buf, binary.LittleEndian, uint16(1))
-		binary.Write(&buf, binary.LittleEndian, uint16(2))
-		binary.Write(&buf, binary.LittleEndian, uint32(44100))
-		binary.Write(&buf, binary.LittleEndian, uint32(176400))
-		binary.Write(&buf, binary.LittleEndian, uint16(4))
-		binary.Write(&buf, binary.LittleEndian, uint16(16))
-
+		// Valid RIFF WAVE header and fmt chunk, but NO data chunk (DataSize == 0):
+		// testutil.WavHeader with a zero duration emits exactly that.
 		p := filepath.Join(tmpDir, "nodata.wav")
-		if err := os.WriteFile(p, buf.Bytes(), 0644); err != nil {
+		if err := os.WriteFile(p, testutil.WavHeader(44100, 2, 16, 0), 0644); err != nil {
 			t.Fatal(err)
 		}
 

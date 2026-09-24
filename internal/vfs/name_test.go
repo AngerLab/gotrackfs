@@ -29,6 +29,34 @@ func TestUniqueName_FreeBaseIsReturnedAsIs(t *testing.T) {
 	}
 }
 
+// TestUniqueName_CollisionChain locks the full walk: when the base and its
+// first suffixed variants are all taken, the chain extends to (3), (4), ...
+func TestUniqueName_CollisionChain(t *testing.T) {
+	taken := map[string]bool{
+		"01. Title.flac":     true,
+		"01. Title (2).flac": true,
+		"01. Title (3).flac": true,
+	}
+	name, collided := uniqueName("01. Title.flac", func(c string) bool { return taken[c] })
+	if want := "01. Title (4).flac"; name != want || !collided {
+		t.Errorf("uniqueName = %q (collided=%v), want %q", name, collided, want)
+	}
+}
+
+// TestUniqueNamePlain_CollisionChain is the whole-name variant of the chain
+// walk: suffixes accumulate on the full name, not before an extension.
+func TestUniqueNamePlain_CollisionChain(t *testing.T) {
+	taken := map[string]bool{
+		"CD1":     true,
+		"CD1 (2)": true,
+		"CD1 (3)": true,
+	}
+	name, collided := uniqueNamePlain("CD1", func(c string) bool { return taken[c] })
+	if want := "CD1 (4)"; name != want || !collided {
+		t.Errorf("uniqueNamePlain = %q (collided=%v), want %q", name, collided, want)
+	}
+}
+
 func TestSanitizeFilename(t *testing.T) {
 	tests := []struct {
 		input    string

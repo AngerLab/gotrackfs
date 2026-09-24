@@ -38,9 +38,6 @@ type dirFacts struct {
 	dirModTime time.Time
 }
 
-// buildDirState discovers CUE and audio files in dirPath, parses them,
-// and computes the DirState along with dirFacts for caching.
-// maxQuality optionally caps the sliced-track output format (zero = keep source).
 // albumBuilder carries the cross-cutting state of one directory build: the
 // directory being built, logging, the quality cap, and the audio-claim
 // ledger shared by every cue sheet in that directory. Making these fields
@@ -55,6 +52,9 @@ type albumBuilder struct {
 	claimedAudios map[string]bool // resolved source paths claimed by earlier cue sheets
 }
 
+// buildDirState discovers CUE and audio files in dirPath, parses them,
+// and computes the DirState along with dirFacts for caching.
+// maxQuality optionally caps the sliced-track output format (zero = keep source).
 func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger, maxQuality track.Quality) (*DirState, *dirFacts, error) {
 	if logger == nil {
 		logger = slog.Default()
@@ -113,7 +113,9 @@ func (b *albumBuilder) collectAlbums(cueFiles []string) []*Album {
 }
 
 // buildAlbumFromCue parses one CUE sheet and materializes its virtual tracks.
-// skip is true when the sheet must be ignored (unparseable, empty, or already split).
+// skip is true when the sheet must be ignored: unparseable content, an empty
+// sheet (TotalTracks == 0), a per-track FILE layout (isAlreadySplit), or a
+// FILE entry whose source audio cannot be resolved or stat'ed.
 func (b *albumBuilder) buildAlbumFromCue(cuePath string) (*Album, bool) {
 	sheet, err := cue.ParseFile(cuePath)
 	if err != nil {

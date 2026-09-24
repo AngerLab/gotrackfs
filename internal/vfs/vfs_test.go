@@ -420,23 +420,30 @@ FILE "music.flac" WAVE
 
 func TestVFS_LoggerOrDefault(t *testing.T) {
 	tmpDir := t.TempDir()
-	var logBuf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	v := New(Options{
-		SourceRoot: tmpDir,
-		Logger:     logger,
+	run := func(t *testing.T, opts Options) {
+		t.Helper()
+		v := New(opts)
+		if v.logger == nil {
+			t.Fatalf("expected logger to be initialized")
+		}
+		var st fuse.Stat_t
+		if code := v.Getattr("/", &st, 0); code != 0 {
+			t.Fatalf("Getattr(/) failed: %d", code)
+		}
+	}
+
+	t.Run("explicit logger", func(t *testing.T) {
+		var logBuf bytes.Buffer
+		logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		run(t, Options{SourceRoot: tmpDir, Logger: logger})
 	})
 
-	if v.logger == nil {
-		t.Fatalf("expected logger to be initialized")
-	}
-
-	var st fuse.Stat_t
-	code := v.Getattr("/", &st, 0)
-	if code != 0 {
-		t.Fatalf("Getattr(/) failed: %d", code)
-	}
+	t.Run("nil logger", func(t *testing.T) {
+		// Zero Options must fall back to the default logger instead of
+		// panicking or leaving v.logger nil (EnsureDefaults path).
+		run(t, Options{SourceRoot: tmpDir})
+	})
 }
 
 func TestVFS_CollisionAvoidance(t *testing.T) {

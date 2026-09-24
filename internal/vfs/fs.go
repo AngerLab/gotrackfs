@@ -434,9 +434,12 @@ func (v *VFS) openReal(realPath string) (int, uint64) {
 
 type fileHandle struct {
 	// file is written exactly once, under v.mu, before the handle is
-	// published in openFiles; Release removes the handle under v.mu and
-	// closes the file. Read serves ReadAt calls after grabbing the handle
-	// from the table, so a released handle can no longer be reached.
+	// published in openFiles; Release deletes the entry under v.mu and
+	// closes the file outside the lock. The deletion only keeps the handle
+	// out of reach for new calls: a Read that already fetched the handle
+	// can still be inside ReadAt while Close runs, and that error is
+	// surfaced as EIO by the Read mapping — not EBADF like the pre-refactor
+	// atomic.Swap guard. Callers must not assume a released handle is idle.
 	file      *os.File
 	cutterKey string // non-empty if acquired via cutter
 }

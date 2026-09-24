@@ -61,6 +61,7 @@ func buildDirState(fs hostfs.FS, dirPath string, dirFi os.FileInfo, logger *slog
 	if len(albums) == 0 {
 		return nil, facts, nil
 	}
+	realignSourcePathCase(fs, dirPath, albums, logger)
 
 	dirState := baseDirState(albums)
 	realNames, artwork := scanDirEntries(dirPath)
@@ -324,6 +325,63 @@ func buildTrackTags(sheet *cue.Sheet, tr cue.Track, title string) map[string]str
 		tags["composer"] = tr.Songwriter
 	}
 	return tags
+}
+
+// realignSourcePathCase rewrites every album source path (and the track
+// slices referencing them) to the name the host filesystem actually reports.
+//
+// On case-insensitive filesystems (APFS, NTFS) a probe literal can resolve
+// to a differently-cased file: Stat("album.flac") finds album.FLAC. Keys in
+// HiddenMonoliths are compared byte-for-byte against readdir names, so they
+// must carry the on-disk case, or the monolith leaks into the virtual
+// listing. On case-sensitive hosts the probe literal is already the on-disk
+// name and this is a no-op.
+//
+// Lookups remain exact-string: on a case-insensitive host a client statting
+// the folded variant of a hidden monolith will still see the real file.
+// Making lookup host-case-aware is a separate change.
+func realignSourcePathCase(fs hostfs.FS, dirPath string, albums []*Album, logger *slog.Logger) {
+	entries, err := fs.List(dirPath)
+	if err != nil {
+		if logger != nil {
+			logger.Warn("vfs: cannot list dir to realign source path case", "dir", dirPath, "error", err)
+		}
+		return
+	}
+	names := make([]string, 0, len(entries))
+	exact := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		n := norm.NFC.String(e.Name())
+		names = append(names, n)
+		exact[n] = true
+	}
+	onDiskName := func(p string) string {
+		base := norm.NFC.String(filepath.Base(p))
+		if exact[base] {
+			return base
+		}
+		for _, n := range names {
+			if strings.EqualFold(n, base) {
+				return n
+			}
+		}
+		return base
+	}
+	realign := func(p string) string {
+		real := filepath.Join(filepath.Dir(p), onDiskName(p))
+		if real != p && logger != nil {
+			logger.Debug("vfs: realigned probe path to on-disk name", "probe", p, "onDisk", real)
+		}
+		return real
+	}
+	for _, album := range albums {
+		for i, src := range album.SourceAudioPaths {
+			album.SourceAudioPaths[i] = realign(src)
+		}
+		for i := range album.Tracks {
+			album.Tracks[i].Slice.SourceAudioPath = realign(album.Tracks[i].Slice.SourceAudioPath)
+		}
+	}
 }
 
 // baseDirState builds the empty skeleton of a DirState and registers the

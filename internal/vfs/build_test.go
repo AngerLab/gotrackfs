@@ -666,6 +666,104 @@ FILE "side_b.flac" FLAC
 	}
 }
 
+// TestRealignSourcePathCase pins the mechanism: probe literals that differ
+// in case from the on-disk name get rewritten to the on-disk name, exact
+// matches stay untouched, and track slices follow the album-level paths.
+func TestRealignSourcePathCase(t *testing.T) {
+	m := hostfs.NewMem().
+		AddFile("/ALBUM.FLAC", nil).
+		AddFile("/album.cue", nil).
+		AddFile("/other.flac", nil)
+
+	albums := []*Album{
+		{
+			// "album.flac" probe literal, on disk it is "ALBUM.FLAC".
+			SourceAudioPaths: []string{"/album.flac"},
+			Tracks: []VirtualTrack{
+				{Slice: track.Slice{SourceAudioPath: "/album.flac"}},
+				{Slice: track.Slice{SourceAudioPath: "/ALBUM.FLAC"}}, // already on-disk
+			},
+		},
+		{
+			// Exact match: must be a no-op.
+			SourceAudioPaths: []string{"/other.flac"},
+			Tracks:           []VirtualTrack{{Slice: track.Slice{SourceAudioPath: "/other.flac"}}},
+		},
+	}
+
+	realignSourcePathCase(m, "/", albums, nil)
+
+	if got := albums[0].SourceAudioPaths[0]; got != "/ALBUM.FLAC" {
+		t.Errorf("SourceAudioPaths[0] = %q, want %q (realigned to on-disk name)", got, "/ALBUM.FLAC")
+	}
+	if got := albums[0].Tracks[0].Slice.SourceAudioPath; got != "/ALBUM.FLAC" {
+		t.Errorf("Tracks[0] source = %q, want %q", got, "/ALBUM.FLAC")
+	}
+	if got := albums[0].Tracks[1].Slice.SourceAudioPath; got != "/ALBUM.FLAC" {
+		t.Errorf("Tracks[1] source = %q, want %q (exact on-disk name untouched)", got, "/ALBUM.FLAC")
+	}
+	if got := albums[1].SourceAudioPaths[0]; got != "/other.flac" {
+		t.Errorf("exact-match source = %q, want %q (no-op)", got, "/other.flac")
+	}
+}
+
+// TestBuildDirState_HiddenMonolithKeyMatchesReadDirName locks the APFS
+// monolith leak end-to-end: the resolver resolves the declared "album.flac"
+// onto on-disk "ALBUM.FLAC" (case folding on a case-insensitive host). The
+// hidden-monolith key must be the name readdir reports, or the exact-string
+// listing lookup misses and the audio file leaks into the virtual directory.
+// On a case-sensitive host the same property must hold via the unclaimed
+// scan (which returns the real name), so the test is host-independent.
+func TestBuildDirState_HiddenMonolithKeyMatchesReadDirName(t *testing.T) {
+	tmpDir := t.TempDir()
+	cueContent := `TITLE "Case Album"
+PERFORMER "Artist"
+FILE "album.flac" WAVE
+  TRACK 01 AUDIO
+    TITLE "Track 1"
+    INDEX 01 00:00:00`
+	if err := os.WriteFile(filepath.Join(tmpDir, "album.cue"), []byte(cueContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "ALBUM.FLAC"), []byte("not a real flac"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dirFi, err := os.Stat(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, _, err := buildDirState(hostfs.Default(), tmpDir, dirFi, nil, track.Quality{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if state == nil || len(state.TracksByName) != 1 {
+		t.Fatalf("expected 1 track, got %+v", state)
+	}
+
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	onDisk := ""
+	for _, e := range entries {
+		if e.Name() != "album.cue" {
+			onDisk = e.Name()
+		}
+	}
+	if onDisk == "" {
+		t.Fatal("expected the audio file in the directory listing")
+	}
+	if !state.HiddenMonoliths[onDisk] {
+		t.Errorf("HiddenMonoliths[%q] = false, want true (key must be the on-disk name)", onDisk)
+	}
+	// readdir names are matched byte-for-byte, so the probe literal must not
+	// be the key when it differs from the on-disk name.
+	if state.HiddenMonoliths["album.flac"] {
+		t.Errorf("HiddenMonoliths has probe literal %q, want it realigned to %q", "album.flac", onDisk)
+	}
+}
+
 // trackByNum returns the virtual track with the given track number from the
 // flat track table. TracksByName is a map (lookups in production go by
 // filename), so the tests address tracks by number instead of by index into

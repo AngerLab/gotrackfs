@@ -665,6 +665,13 @@ func TestRealignSourcePathCase(t *testing.T) {
 		}
 	}
 
+	// Escaped declared name: FILE "../audio/monolith.flac" is joined verbatim
+	// by the resolver; its basename is not in this directory's readdir, so
+	// realign must be a no-op. Rewriting it (e.g. to a normalized form)
+	// would corrupt a path that audio.Probe and ffmpeg open without a
+	// norm retry.
+	escaped := filepath.Join(filepath.Dir(tmpDir), "audio", "monolith.flac")
+
 	albums := []*Album{
 		{
 			// "album.flac" probe literal, on disk it is "ALBUM.FLAC".
@@ -678,6 +685,11 @@ func TestRealignSourcePathCase(t *testing.T) {
 			// Exact match: must be a no-op.
 			SourceAudioPaths: []string{filepath.Join(tmpDir, "other.flac")},
 			Tracks:           []VirtualTrack{{Slice: track.Slice{SourceAudioPath: filepath.Join(tmpDir, "other.flac")}}},
+		},
+		{
+			// Outside the album directory: must survive realign verbatim.
+			SourceAudioPaths: []string{escaped},
+			Tracks:           []VirtualTrack{{Slice: track.Slice{SourceAudioPath: escaped}}},
 		},
 	}
 
@@ -694,6 +706,12 @@ func TestRealignSourcePathCase(t *testing.T) {
 	}
 	if got := albums[1].SourceAudioPaths[0]; got != filepath.Join(tmpDir, "other.flac") {
 		t.Errorf("exact-match source = %q, want %q (no-op)", got, filepath.Join(tmpDir, "other.flac"))
+	}
+	if got := albums[2].SourceAudioPaths[0]; got != escaped {
+		t.Errorf("escaped source = %q, want verbatim %q (no-op)", got, escaped)
+	}
+	if got := albums[2].Tracks[0].Slice.SourceAudioPath; got != escaped {
+		t.Errorf("escaped track source = %q, want verbatim %q (no-op)", got, escaped)
 	}
 }
 
@@ -743,6 +761,22 @@ FILE "Épisode 1.flac" WAVE
 		if _, err := os.Stat(got); err != nil {
 			t.Errorf("realigned path %q must open via plain os.Stat (NFC form would fail on byte-exact hosts): %v", got, err)
 		}
+	}
+
+	// Escaped source paths live outside the album dir: their basename is not
+	// in the realign directory listing, so realign must leave the byte-exact
+	// NFD form untouched instead of folding it to NFC.
+	escaped := filepath.Join(filepath.Dir(tmpDir), "up", norm.NFD.String("Épisode 9")+".flac")
+	album := &Album{
+		SourceAudioPaths: []string{escaped},
+		Tracks:           []VirtualTrack{{Slice: track.Slice{SourceAudioPath: escaped}}},
+	}
+	(&albumBuilder{dirPath: tmpDir}).realignSourcePathCase([]*Album{album})
+	if got := album.SourceAudioPaths[0]; got != escaped {
+		t.Errorf("escaped source = %q, want verbatim %q (NFC form would break byte-exact hosts)", got, escaped)
+	}
+	if got := album.Tracks[0].Slice.SourceAudioPath; got != escaped {
+		t.Errorf("escaped track source = %q, want verbatim %q (NFC form would break byte-exact hosts)", got, escaped)
 	}
 }
 

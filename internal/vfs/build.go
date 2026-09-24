@@ -75,10 +75,10 @@ func buildDirState(dirPath string, dirFi os.FileInfo, logger *slog.Logger, maxQu
 	if len(albums) == 0 {
 		return nil, facts, nil
 	}
-	b.realignSourcePathCase(albums)
+	entries := b.realignSourcePathCase(albums)
 
 	dirState := baseDirState(albums)
-	realNames, artwork := scanDirEntries(dirPath)
+	realNames, artwork := scanDirEntries(dirPath, entries)
 	assignArtwork(albums, findPrimaryArtwork(artwork))
 	// Cutter keys must be computed after artwork: Slice.Key() hashes ArtworkPath.
 	finalizeTrackCutterKeys(albums)
@@ -355,13 +355,17 @@ func buildTrackTags(sheet *cue.Sheet, tr cue.Track, title string) map[string]str
 // Lookups remain exact-string: on a case-insensitive host a client statting
 // the folded variant of a hidden monolith will still see the real file.
 // Making lookup host-case-aware is a separate change.
-func (b *albumBuilder) realignSourcePathCase(albums []*Album) {
+// realignSourcePathCase rewrites source paths to their byte-exact on-disk
+// names and returns the directory listing it used, so callers can reuse it
+// instead of issuing a second readdir (the listing is one syscall, one
+// snapshot of the directory).
+func (b *albumBuilder) realignSourcePathCase(albums []*Album) []os.DirEntry {
 	entries, err := readDir(b.dirPath)
 	if err != nil {
 		if b.logger != nil {
 			b.logger.Warn("vfs: cannot list dir to realign source path case", "dir", b.dirPath, "error", err)
 		}
-		return
+		return nil
 	}
 	// NFC query key -> byte-exact on-disk name. The on-disk name must be
 	// returned verbatim, not the NFC form: audio probing and ffmpeg open
@@ -386,7 +390,14 @@ func (b *albumBuilder) realignSourcePathCase(albums []*Album) {
 				return onDisk[n]
 			}
 		}
-		return base
+		// Miss: the basename is not a child of this directory. That happens
+		// for paths that were never probed here — e.g. a cue declaring
+		// FILE "../audio/monolith.flac", which the resolver joins verbatim.
+		// Return the basename unchanged: realigning to the NFC form would
+		// corrupt a byte-exact path that audio.Probe and ffmpeg open without
+		// an NFC/NFD retry, exactly what the verbatim contract above forbids.
+		// Unchanged basename means realign is an honest no-op here.
+		return filepath.Base(p)
 	}
 	realign := func(p string) string {
 		real := filepath.Join(filepath.Dir(p), onDiskName(p))
@@ -403,6 +414,7 @@ func (b *albumBuilder) realignSourcePathCase(albums []*Album) {
 			album.Tracks[i].Slice.SourceAudioPath = realign(album.Tracks[i].Slice.SourceAudioPath)
 		}
 	}
+	return entries
 }
 
 // baseDirState builds the empty skeleton of a DirState and registers the
@@ -424,10 +436,12 @@ func baseDirState(albums []*Album) *DirState {
 
 // scanDirEntries lists the directory once and classifies entries into
 // occupied names (for collision avoidance) and artwork candidates.
-func scanDirEntries(dirPath string) (realNames map[string]bool, artwork map[string]string) {
-	rawEntries, err := readDir(dirPath)
-	if err != nil {
-		rawEntries = nil
+// entries is the listing produced by realignSourcePathCase; a nil slice means
+// realign could not list the directory, so fall back to a fresh readdir.
+func scanDirEntries(dirPath string, entries []os.DirEntry) (realNames map[string]bool, artwork map[string]string) {
+	rawEntries := entries
+	if rawEntries == nil {
+		rawEntries, _ = readDir(dirPath)
 	}
 	realNames = make(map[string]bool, len(rawEntries))
 	artwork = make(map[string]string)

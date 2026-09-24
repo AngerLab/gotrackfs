@@ -44,7 +44,9 @@ func resolveAudioByStem(fs hostfs.FS, dir, stem string, claimed map[string]bool)
 
 // resolveAudioFileForCue resolves the matching monolithic audio file for a CUE sheet.
 // It checks declared filename, matching stem with audio extensions, and single unclaimed audio.
-func resolveAudioFileForCue(fs hostfs.FS, dir, cuePath, declaredName string, claimed map[string]bool) string {
+func (b *albumBuilder) resolveAudioFileForCue(cuePath, declaredName string, claimed map[string]bool) string {
+	dir := b.dirPath
+	fs := b.fs
 	// 1. Declared name in CUE
 	if declaredName != "" {
 		p := filepath.Join(dir, declaredName)

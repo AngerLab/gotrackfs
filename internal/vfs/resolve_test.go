@@ -12,6 +12,13 @@ import (
 // payoff. No temp dirs, no real files, no cleanup — the directory shape is
 // declared in three lines.
 
+// resolveWith drives resolveAudioFileForCue through a minimal albumBuilder
+// (the resolver lives on the builder because it shares its filesystem and
+// directory scope).
+func resolveWith(m hostfs.FS, dir, cuePath, declared string, claimed map[string]bool) string {
+	return (&albumBuilder{fs: m, dirPath: dir}).resolveAudioFileForCue(cuePath, declared, claimed)
+}
+
 // TestResolveAudio_LowercaseExtensionPriority locks in the historical probe
 // order: lowercase stems (.flac .wav ...) are tried before uppercase .FLAC/.WAV.
 func TestResolveAudio_LowercaseExtensionPriority(t *testing.T) {
@@ -19,7 +26,7 @@ func TestResolveAudio_LowercaseExtensionPriority(t *testing.T) {
 		AddFile("album.wav", wavBytes()).
 		AddFile("album.FLAC", nil)
 
-	got := resolveAudioFileForCue(m, "/", "/album.cue", "album.flac", map[string]bool{})
+	got := resolveWith(m, "/", "/album.cue", "album.flac", map[string]bool{})
 	if want := filepath.Join("/", "album.wav"); got != want {
 		t.Errorf("resolveAudioFileForCue = %q, want %q (lowercase .wav must win over .FLAC)", got, want)
 	}
@@ -30,7 +37,7 @@ func TestResolveAudio_LowercaseExtensionPriority(t *testing.T) {
 func TestResolveAudio_UppercaseFLACFallback(t *testing.T) {
 	m := hostfs.NewMem().AddFile("album.FLAC", nil)
 
-	got := resolveAudioFileForCue(m, "/", "/album.cue", "album.flac", map[string]bool{})
+	got := resolveWith(m, "/", "/album.cue", "album.flac", map[string]bool{})
 	if want := filepath.Join("/", "album.FLAC"); got != want {
 		t.Errorf("resolveAudioFileForCue = %q, want %q", got, want)
 	}
@@ -43,7 +50,7 @@ func TestResolveAudio_UppercaseWAVIsLastInPriority(t *testing.T) {
 		AddFile("album.FLAC", nil).
 		AddFile("album.WAV", nil)
 
-	got := resolveAudioFileForCue(m, "/", "/album.cue", "album.flac", map[string]bool{})
+	got := resolveWith(m, "/", "/album.cue", "album.flac", map[string]bool{})
 	if want := filepath.Join("/", "album.FLAC"); got != want {
 		t.Errorf("resolveAudioFileForCue = %q, want %q (.FLAC is probed before .WAV)", got, want)
 	}
@@ -56,7 +63,7 @@ func TestResolveAudio_DeclaredNameWins(t *testing.T) {
 		AddFile("Album - 01.flac", nil).
 		AddFile("album.wav", nil)
 
-	got := resolveAudioFileForCue(m, "/", "/album.cue", "Album - 01.flac", map[string]bool{})
+	got := resolveWith(m, "/", "/album.cue", "Album - 01.flac", map[string]bool{})
 	if want := filepath.Join("/", "Album - 01.flac"); got != want {
 		t.Errorf("resolveAudioFileForCue = %q, want %q (declared name wins)", got, want)
 	}
@@ -70,7 +77,7 @@ func TestResolveAudio_ClaimedCandidatesAreSkipped(t *testing.T) {
 		AddFile("other.flac", nil)
 
 	claimed := map[string]bool{"/album.flac": true}
-	got := resolveAudioFileForCue(m, "/", "/album.cue", "album.flac", claimed)
+	got := resolveWith(m, "/", "/album.cue", "album.flac", claimed)
 	if want := "/other.flac"; got != want {
 		t.Errorf("resolveAudioFileForCue = %q, want %q (claimed candidate must be skipped)", got, want)
 	}
@@ -82,7 +89,7 @@ func TestResolveAudio_ClaimedCandidatesAreSkipped(t *testing.T) {
 func TestResolveAudio_WaveMonolithIsResolved(t *testing.T) {
 	m := hostfs.NewMem().AddFile("album.wave", wavBytes())
 
-	got := resolveAudioFileForCue(m, "/", "/album.cue", "album.flac", map[string]bool{})
+	got := resolveWith(m, "/", "/album.cue", "album.flac", map[string]bool{})
 	if want := filepath.Join("/", "album.wave"); got != want {
 		t.Errorf("resolveAudioFileForCue = %q, want %q", got, want)
 	}
@@ -95,7 +102,7 @@ func TestResolveAudio_WavBeatsWave(t *testing.T) {
 		AddFile("album.wav", wavBytes()).
 		AddFile("album.wave", wavBytes())
 
-	got := resolveAudioFileForCue(m, "/", "/album.cue", "album.flac", map[string]bool{})
+	got := resolveWith(m, "/", "/album.cue", "album.flac", map[string]bool{})
 	if want := filepath.Join("/", "album.wav"); got != want {
 		t.Errorf("resolveAudioFileForCue = %q, want %q (.wav must beat .wave)", got, want)
 	}
@@ -108,7 +115,7 @@ func TestResolveAudio_WaveBeatsApe(t *testing.T) {
 		AddFile("album.wave", wavBytes()).
 		AddFile("album.ape", nil)
 
-	got := resolveAudioFileForCue(m, "/", "/album.cue", "album.flac", map[string]bool{})
+	got := resolveWith(m, "/", "/album.cue", "album.flac", map[string]bool{})
 	if want := filepath.Join("/", "album.wave"); got != want {
 		t.Errorf("resolveAudioFileForCue = %q, want %q (.wave must beat .ape)", got, want)
 	}
@@ -120,7 +127,7 @@ func TestResolveAudio_WaveBeatsApe(t *testing.T) {
 func TestResolveAudio_WaveCountsAsUnclaimedAudio(t *testing.T) {
 	m := hostfs.NewMem().AddFile("other.wave", wavBytes())
 
-	got := resolveAudioFileForCue(m, "/", "/album.cue", "", map[string]bool{})
+	got := resolveWith(m, "/", "/album.cue", "", map[string]bool{})
 	if want := filepath.Join("/", "other.wave"); got != want {
 		t.Errorf("resolveAudioFileForCue = %q, want %q (single unclaimed .wave)", got, want)
 	}
@@ -174,7 +181,7 @@ func TestResolveAudio_HostFSCaseSemantics(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := resolveAudioFileForCue(hostfs.Default(), dir, filepath.Join(dir, "album.cue"), "album.flac", map[string]bool{})
+	got := resolveWith(hostfs.Default(), dir, filepath.Join(dir, "album.cue"), "album.flac", map[string]bool{})
 
 	if hostCaseSensitive(dir) {
 		if want := filepath.Join(dir, "album.wav"); got != want {

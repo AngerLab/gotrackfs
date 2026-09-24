@@ -42,6 +42,21 @@ type dirFacts struct {
 // buildDirState discovers CUE and audio files in dirPath, parses them,
 // and computes the DirState along with dirFacts for caching.
 // maxQuality optionally caps the sliced-track output format (zero = keep source).
+// albumBuilder carries the cross-cutting state of one directory build: the
+// filesystem, the directory being built, logging, the quality cap, and the
+// audio-claim ledger shared by every cue sheet in that directory. Making
+// these fields instead of parameters is what keeps the per-file functions
+// small — virtualTracksForFile used to take nine arguments, and every new
+// cross-cutting concern (fs before it, ctx next) would have grown every
+// signature in the chain.
+type albumBuilder struct {
+	fs            hostfs.FS
+	dirPath       string
+	logger        *slog.Logger
+	maxQuality    track.Quality
+	claimedAudios map[string]bool // resolved source paths claimed by earlier cue sheets
+}
+
 func buildDirState(fs hostfs.FS, dirPath string, dirFi os.FileInfo, logger *slog.Logger, maxQuality track.Quality) (*DirState, *dirFacts, error) {
 	if logger == nil {
 		logger = slog.Default()
@@ -57,11 +72,12 @@ func buildDirState(fs hostfs.FS, dirPath string, dirFi os.FileInfo, logger *slog
 		return nil, facts, nil
 	}
 
-	albums := collectAlbums(fs, dirPath, cueFiles, logger, maxQuality)
+	b := albumBuilder{fs: fs, dirPath: dirPath, logger: logger, maxQuality: maxQuality, claimedAudios: make(map[string]bool)}
+	albums := b.collectAlbums(cueFiles)
 	if len(albums) == 0 {
 		return nil, facts, nil
 	}
-	realignSourcePathCase(fs, dirPath, albums, logger)
+	b.realignSourcePathCase(albums)
 
 	dirState := baseDirState(albums)
 	realNames, artwork := scanDirEntries(fs, dirPath)
@@ -83,16 +99,15 @@ func buildDirState(fs hostfs.FS, dirPath string, dirFi os.FileInfo, logger *slog
 // collectAlbums parses every non-skipped CUE sheet in cueFiles into an Album.
 // Claimed plaintext audio files are tracked so two CUE sheets never resolve
 // to the same source file.
-func collectAlbums(fs hostfs.FS, dirPath string, cueFiles []string, logger *slog.Logger, maxQuality track.Quality) []*Album {
+func (b *albumBuilder) collectAlbums(cueFiles []string) []*Album {
 	var albums []*Album
-	claimedAudios := make(map[string]bool)
 	for _, cuePath := range cueFiles {
-		album, skip := buildAlbumFromCue(fs, dirPath, cuePath, claimedAudios, logger, maxQuality)
+		album, skip := b.buildAlbumFromCue(cuePath)
 		if skip {
 			continue
 		}
 		for _, p := range album.SourceAudioPaths {
-			claimedAudios[p] = true
+			b.claimedAudios[p] = true
 		}
 		albums = append(albums, album)
 	}
@@ -112,20 +127,20 @@ func parseCueFile(fs hostfs.FS, cuePath string) (*cue.Sheet, error) {
 
 // buildAlbumFromCue parses one CUE sheet and materializes its virtual tracks.
 // skip is true when the sheet must be ignored (unparseable, empty, or already split).
-func buildAlbumFromCue(fs hostfs.FS, dirPath, cuePath string, claimedAudios map[string]bool, logger *slog.Logger, maxQuality track.Quality) (*Album, bool) {
-	sheet, err := parseCueFile(fs, cuePath)
+func (b *albumBuilder) buildAlbumFromCue(cuePath string) (*Album, bool) {
+	sheet, err := parseCueFile(b.fs, cuePath)
 	if err != nil {
-		logger.Warn("vfs: skipping invalid cue file", "path", cuePath, "error", err)
+		b.logger.Warn("vfs: skipping invalid cue file", "path", cuePath, "error", err)
 		return nil, true
 	}
 
 	totalTracks := sheet.TotalTracks()
 	if totalTracks == 0 {
-		logger.Warn("vfs: skipping cue file with no tracks", "path", cuePath)
+		b.logger.Warn("vfs: skipping cue file with no tracks", "path", cuePath)
 		return nil, true
 	}
 	if isAlreadySplit(sheet) {
-		logger.Debug("vfs: skipping multi-file cue (already split per track)",
+		b.logger.Debug("vfs: skipping multi-file cue (already split per track)",
 			"path", cuePath, "files", len(sheet.Files), "tracks", totalTracks)
 		return nil, true
 	}
@@ -139,7 +154,7 @@ func buildAlbumFromCue(fs hostfs.FS, dirPath, cuePath string, claimedAudios map[
 		if len(f.Tracks) == 0 {
 			continue
 		}
-		tracks, sourcePath, ok := virtualTracksForFile(fs, dirPath, cuePath, sheet, f, claimedAudios, sourcePaths, logger, maxQuality)
+		tracks, sourcePath, ok := b.virtualTracksForFile(sheet, f, cuePath, sourcePaths)
 		if !ok {
 			return nil, true
 		}
@@ -158,34 +173,34 @@ func buildAlbumFromCue(fs hostfs.FS, dirPath, cuePath string, claimedAudios map[
 // virtualTracksForFile resolves the audio file declared by one FILE entry of a
 // CUE sheet and builds the virtual tracks it contributes. ok is false when the
 // source audio cannot be resolved or stat'ed (in which case the whole cue is skipped).
-func virtualTracksForFile(fs hostfs.FS, dirPath, cuePath string, sheet *cue.Sheet, f *cue.File, claimedAudios map[string]bool, cueSourcePaths []string, logger *slog.Logger, maxQuality track.Quality) (tracks []VirtualTrack, sourcePath string, ok bool) {
-	alreadyClaimed := make(map[string]bool, len(claimedAudios)+len(cueSourcePaths))
-	for k, v := range claimedAudios {
+func (b *albumBuilder) virtualTracksForFile(sheet *cue.Sheet, f *cue.File, cuePath string, cueSourcePaths []string) (tracks []VirtualTrack, sourcePath string, ok bool) {
+	alreadyClaimed := make(map[string]bool, len(b.claimedAudios)+len(cueSourcePaths))
+	for k, v := range b.claimedAudios {
 		alreadyClaimed[k] = v
 	}
 	for _, p := range cueSourcePaths {
 		alreadyClaimed[p] = true
 	}
 
-	audioPath := resolveAudioFileForCue(fs, dirPath, cuePath, f.Name, alreadyClaimed)
+	audioPath := b.resolveAudioFileForCue(cuePath, f.Name, alreadyClaimed)
 	if audioPath == "" {
-		logger.Warn("vfs: audio file not found for cue", "cue", cuePath, "declared", f.Name)
+		b.logger.Warn("vfs: audio file not found for cue", "cue", cuePath, "declared", f.Name)
 		return nil, "", false
 	}
-	audioFi, err := fs.Stat(audioPath)
+	audioFi, err := b.fs.Stat(audioPath)
 	if err != nil {
-		logger.Warn("vfs: cannot stat audio file for cue", "cue", cuePath, "audio", audioPath, "error", err)
+		b.logger.Warn("vfs: cannot stat audio file for cue", "cue", cuePath, "audio", audioPath, "error", err)
 		return nil, "", false
 	}
 
-	audioInfo, probeErr := audio.ProbeFS(fs, audioPath)
+	audioInfo, probeErr := audio.ProbeFS(b.fs, audioPath)
 	if probeErr != nil {
-		logger.Debug("vfs: failed to probe audio file", "audio", audioPath, "error", probeErr)
+		b.logger.Debug("vfs: failed to probe audio file", "audio", audioPath, "error", probeErr)
 	}
 	fileAudioDuration := audioInfo.Duration
 
 	// Quality cap: probe the source format per audio file and lower cuts that exceed it.
-	targetRate, targetBits, qualityRatio := audioQualityPlan(maxQuality, audioInfo.Format, probeErr, audioPath, logger)
+	targetRate, targetBits, qualityRatio := audioQualityPlan(b.maxQuality, audioInfo.Format, probeErr, audioPath, b.logger)
 
 	totalAudioSize := audioFi.Size()
 	totalKnownDuration := knownFileDuration(fileAudioDuration, f)
@@ -351,11 +366,11 @@ func buildTrackTags(sheet *cue.Sheet, tr cue.Track, title string) map[string]str
 // Lookups remain exact-string: on a case-insensitive host a client statting
 // the folded variant of a hidden monolith will still see the real file.
 // Making lookup host-case-aware is a separate change.
-func realignSourcePathCase(fs hostfs.FS, dirPath string, albums []*Album, logger *slog.Logger) {
-	entries, err := fs.List(dirPath)
+func (b *albumBuilder) realignSourcePathCase(albums []*Album) {
+	entries, err := b.fs.List(b.dirPath)
 	if err != nil {
-		if logger != nil {
-			logger.Warn("vfs: cannot list dir to realign source path case", "dir", dirPath, "error", err)
+		if b.logger != nil {
+			b.logger.Warn("vfs: cannot list dir to realign source path case", "dir", b.dirPath, "error", err)
 		}
 		return
 	}
@@ -380,8 +395,8 @@ func realignSourcePathCase(fs hostfs.FS, dirPath string, albums []*Album, logger
 	}
 	realign := func(p string) string {
 		real := filepath.Join(filepath.Dir(p), onDiskName(p))
-		if real != p && logger != nil {
-			logger.Debug("vfs: realigned probe path to on-disk name", "probe", p, "onDisk", real)
+		if real != p && b.logger != nil {
+			b.logger.Debug("vfs: realigned probe path to on-disk name", "probe", p, "onDisk", real)
 		}
 		return real
 	}

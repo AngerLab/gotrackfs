@@ -691,7 +691,7 @@ func TestRealignSourcePathCase(t *testing.T) {
 		},
 	}
 
-	realignSourcePathCase(m, "/", albums, nil)
+	(&albumBuilder{fs: m, dirPath: "/"}).realignSourcePathCase(albums)
 
 	if got := albums[0].SourceAudioPaths[0]; got != "/ALBUM.FLAC" {
 		t.Errorf("SourceAudioPaths[0] = %q, want %q (realigned to on-disk name)", got, "/ALBUM.FLAC")

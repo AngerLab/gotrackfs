@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 )
 
 type flacStreamInfo struct {
@@ -13,16 +12,11 @@ type flacStreamInfo struct {
 	TotalSamples uint64
 }
 
-// probeFLACInfo reads the FLAC STREAMINFO metadata block (34 bytes) and returns container info.
-func probeFLACInfo(filePath string) (flacStreamInfo, error) {
-	f, err := os.Open(filePath)
-	if err != nil {
-		return flacStreamInfo{}, err
-	}
-	defer f.Close()
-
+// probeFLACInfo reads the FLAC STREAMINFO metadata block (34 bytes) from r
+// and returns container info.
+func probeFLACInfo(r io.ReadSeeker) (flacStreamInfo, error) {
 	var magic [4]byte
-	if _, err := io.ReadFull(f, magic[:]); err != nil {
+	if _, err := io.ReadFull(r, magic[:]); err != nil {
 		return flacStreamInfo{}, err
 	}
 	if string(magic[:]) != "fLaC" {
@@ -32,7 +26,7 @@ func probeFLACInfo(filePath string) (flacStreamInfo, error) {
 	// Loop metadata blocks until STREAMINFO (block type 0, usually the very first block)
 	for {
 		var header [4]byte
-		if _, err := io.ReadFull(f, header[:]); err != nil {
+		if _, err := io.ReadFull(r, header[:]); err != nil {
 			return flacStreamInfo{}, err
 		}
 
@@ -45,7 +39,7 @@ func probeFLACInfo(filePath string) (flacStreamInfo, error) {
 				return flacStreamInfo{}, errors.New("flac: STREAMINFO block too small")
 			}
 			var data [34]byte
-			if _, err := io.ReadFull(f, data[:]); err != nil {
+			if _, err := io.ReadFull(r, data[:]); err != nil {
 				return flacStreamInfo{}, err
 			}
 
@@ -71,7 +65,7 @@ func probeFLACInfo(filePath string) (flacStreamInfo, error) {
 			break
 		}
 
-		if _, err := f.Seek(int64(length), io.SeekCurrent); err != nil {
+		if _, err := r.Seek(int64(length), io.SeekCurrent); err != nil {
 			return flacStreamInfo{}, err
 		}
 	}

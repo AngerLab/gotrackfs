@@ -2,14 +2,19 @@ package vfs
 
 import (
 	"bytes"
-	"encoding/binary"
+	"io"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/AngerLab/gotrackfs/internal/audio"
+	"github.com/AngerLab/gotrackfs/internal/testutil"
+
 	"github.com/AngerLab/gotrackfs/internal/track"
+	"golang.org/x/text/unicode/norm"
 )
 
 func TestBuildDirState_Pure(t *testing.T) {
@@ -62,9 +67,6 @@ FILE "audio.flac" WAVE
 	if state == nil {
 		t.Fatalf("expected non-nil DirState")
 	}
-	if len(state.Albums) != 1 {
-		t.Errorf("expected 1 album, got %d", len(state.Albums))
-	}
 	if len(state.TracksByName) != 2 {
 		t.Errorf("expected 2 tracks, got %d", len(state.TracksByName))
 	}
@@ -110,8 +112,8 @@ FILE "audio.flac" WAVE
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state == nil || len(state.Albums) != 1 {
-		t.Fatalf("expected 1 album, got %+v", state)
+	if state == nil || len(state.TracksByName) != 3 {
+		t.Fatalf("expected 3 tracks, got %+v", state)
 	}
 
 	expectArtist := map[int]string{
@@ -119,7 +121,7 @@ FILE "audio.flac" WAVE
 		2: "Woodkid",      // inherited from album PERFORMER
 		3: "Someone Else", // track-level PERFORMER wins
 	}
-	for _, vt := range state.Albums[0].Tracks {
+	for _, vt := range state.TracksByName {
 		want := expectArtist[vt.Num]
 		if got := vt.Slice.Tags["artist"]; got != want {
 			t.Errorf("track %02d: artist = %q, want %q", vt.Num, got, want)
@@ -186,23 +188,6 @@ FILE "nonexistent.flac" WAVE
 	}
 }
 
-// makeFlacHeader builds a minimal file with a valid FLAC STREAMINFO block.
-func makeFlacHeader(rate, chans, bps uint64) []byte {
-	return makeFlacHeaderWithSamples(rate, chans, bps, 1000)
-}
-
-func makeFlacHeaderWithSamples(rate, chans, bps, totalSamples uint64) []byte {
-	var buf bytes.Buffer
-	buf.WriteString("fLaC")
-	buf.Write([]byte{0x80, 0x00, 0x00, 34})
-	var streaminfo [34]byte
-	v := rate<<44 | (chans-1)<<41 | (bps-1)<<36 | (totalSamples & 0xFFFFFFFFF)
-	binary.BigEndian.PutUint64(streaminfo[10:18], v)
-	buf.Write(streaminfo[:])
-	buf.Write(make([]byte, 1024))
-	return buf.Bytes()
-}
-
 func TestBuildDirState_QualityCap(t *testing.T) {
 	cueContent := `TITLE "Test Album"
 FILE "audio.flac" WAVE
@@ -230,9 +215,13 @@ FILE "audio.flac" WAVE
 			if err := os.WriteFile(filepath.Join(tmpDir, "album.cue"), []byte(cueContent), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			audio := makeFlacHeader(tt.srcRate, 2, tt.srcBits)
+			var audio []byte
 			if tt.srcRate == 0 {
+				// Broken-header row: build the junk directly instead of
+				// letting FlacHeader underflow on bps == 0.
 				audio = []byte("junk not a flac at all")
+			} else {
+				audio = testutil.FlacHeader(tt.srcRate, 2, tt.srcBits)
 			}
 			if err := os.WriteFile(filepath.Join(tmpDir, "audio.flac"), audio, 0o644); err != nil {
 				t.Fatal(err)
@@ -246,10 +235,10 @@ FILE "audio.flac" WAVE
 			if err != nil {
 				t.Fatal(err)
 			}
-			if state == nil || len(state.Albums) != 1 {
-				t.Fatalf("expected 1 album, got %v", state)
+			if state == nil || len(state.TracksByName) != 1 {
+				t.Fatalf("expected 1 track, got %v", state)
 			}
-			sl := state.Albums[0].Tracks[0].Slice
+			sl := trackByNum(state, 1).Slice
 			if sl.TargetSampleRate != tt.wantRate || sl.TargetBits != tt.wantBits {
 				t.Errorf("targets = (rate %d, bits %d), want (rate %d, bits %d)",
 					sl.TargetSampleRate, sl.TargetBits, tt.wantRate, tt.wantBits)
@@ -275,7 +264,7 @@ FILE "audio.flac" WAVE
 
 	// 20MB dummy audio file with 192kHz / 24-bit FLAC header, 120s duration
 	totalSamples := uint64(120 * 192000)
-	header := makeFlacHeaderWithSamples(192000, 2, 24, totalSamples)
+	header := testutil.FlacHeaderWithSamples(192000, 2, 24, totalSamples)
 
 	audio := append(header, make([]byte, 20*1024*1024-len(header))...)
 	if err := os.WriteFile(filepath.Join(tmpDir, "audio.flac"), audio, 0o644); err != nil {
@@ -292,7 +281,7 @@ FILE "audio.flac" WAVE
 	if err != nil {
 		t.Fatal(err)
 	}
-	estNoCap := stateNoCap.Albums[0].Tracks[0].EstimatedSize
+	estNoCap := trackByNum(stateNoCap, 1).EstimatedSize
 
 	// 2. With 16-bit / 44.1kHz cap
 	cap16_44 := track.Quality{Bits: 16, SampleRate: 44100}
@@ -300,7 +289,7 @@ FILE "audio.flac" WAVE
 	if err != nil {
 		t.Fatal(err)
 	}
-	estCap := stateCap.Albums[0].Tracks[0].EstimatedSize
+	estCap := trackByNum(stateCap, 1).EstimatedSize
 
 	// Expected ratio is (44100 / 192000) * (16 / 24) = 0.2296875 * 0.666667 = ~0.153125
 	ratio := float64(estCap) / float64(estNoCap)
@@ -309,6 +298,49 @@ FILE "audio.flac" WAVE
 	if ratio < expectedRatio*0.95 || ratio > expectedRatio*1.05 {
 		t.Errorf("estimated size ratio = %f, expected ~%f (noCap=%d, cap=%d)",
 			ratio, expectedRatio, estNoCap, estCap)
+	}
+}
+
+func TestAudioQualityPlan_WavRatioWithoutCap(t *testing.T) {
+	srcFmt := audio.Format{SampleRate: 96000, Bits: 24}
+	// Never pass a nil logger here: audioQualityPlan dereferences it in the
+	// capped branch, and relying on a branch staying unreachable is a
+	// footgun (the production caller always passes one anyway).
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// Without a quality cap the targets stay zero, but the WAV->FLAC size
+	// ratio must still apply (EstimatedSize drives Getattr before any cut).
+	targetRate, targetBits, wavRatio := audioQualityPlan(track.Quality{}, srcFmt, nil, filepath.FromSlash("/tmp/x.wav"), discard)
+	if targetRate != 0 || targetBits != 0 {
+		t.Errorf("no cap: targets = (%d, %d), want (0, 0)", targetRate, targetBits)
+	}
+	if math.Abs(wavRatio-wavToFlacSizeRatio) > 0.001 {
+		t.Errorf("no cap WAV: ratio = %f, want %f", wavRatio, wavToFlacSizeRatio)
+	}
+
+	_, _, flacRatio := audioQualityPlan(track.Quality{}, srcFmt, nil, filepath.FromSlash("/tmp/x.flac"), discard)
+	if flacRatio != 1.0 {
+		t.Errorf("no cap FLAC: ratio = %f, want 1.0", flacRatio)
+	}
+
+	// Cap already satisfied by the source: Plan yields zero targets, which
+	// exercises the logger.Debug branch inside audioQualityPlan — a case
+	// that previously panicked with a nil logger and was only "saved" by
+	// the branch being unreachable in every existing test.
+	targetRate, targetBits, _ = audioQualityPlan(track.Quality{Bits: 16, SampleRate: 44100}, audio.Format{SampleRate: 44100, Bits: 16}, nil, filepath.FromSlash("/tmp/x.flac"), discard)
+	if targetRate != 0 || targetBits != 0 {
+		t.Errorf("cap already met: targets = (%d, %d), want (0, 0)", targetRate, targetBits)
+	}
+
+	// With a cap the WAV factor composes with the quality downscale.
+	capQ := track.Quality{Bits: 16, SampleRate: 44100}
+	targetRate, targetBits, cappedRatio := audioQualityPlan(capQ, srcFmt, nil, filepath.FromSlash("/tmp/x.wav"), slog.Default())
+	if targetRate != 44100 || targetBits != 16 {
+		t.Errorf("cap: targets = (%d, %d), want (44100, 16)", targetRate, targetBits)
+	}
+	want := wavToFlacSizeRatio * (44100.0 / 96000.0) * (16.0 / 24.0)
+	if math.Abs(cappedRatio-want) > 0.001 {
+		t.Errorf("cap WAV: ratio = %f, want %f", cappedRatio, want)
 	}
 }
 
@@ -392,27 +424,23 @@ FILE "side_b.flac" FLAC
 	if state == nil {
 		t.Fatalf("expected non-nil DirState for multi-file CUE with multi-track files")
 	}
-	if len(state.Albums) != 1 {
-		t.Fatalf("expected 1 album, got %d", len(state.Albums))
-	}
-	album := state.Albums[0]
-	if len(album.Tracks) != 4 {
-		t.Fatalf("expected 4 tracks, got %d", len(album.Tracks))
+	if len(state.TracksByName) != 4 {
+		t.Fatalf("expected 4 tracks, got %d", len(state.TracksByName))
 	}
 
 	// Tracks 1 & 2 should point to side_a.flac
 	for _, num := range []int{1, 2} {
-		tr := album.Tracks[num-1]
-		if tr.Slice.SourceAudioPath != sideAPath {
-			t.Errorf("track %d SourceAudioPath = %s, want %s", num, tr.Slice.SourceAudioPath, sideAPath)
+		tr := trackByNum(state, num)
+		if tr == nil || tr.Slice.SourceAudioPath != sideAPath {
+			t.Errorf("track %d SourceAudioPath = %v, want %s", num, tr, sideAPath)
 		}
 	}
 
 	// Tracks 3 & 4 should point to side_b.flac
 	for _, num := range []int{3, 4} {
-		tr := album.Tracks[num-1]
-		if tr.Slice.SourceAudioPath != sideBPath {
-			t.Errorf("track %d SourceAudioPath = %s, want %s", num, tr.Slice.SourceAudioPath, sideBPath)
+		tr := trackByNum(state, num)
+		if tr == nil || tr.Slice.SourceAudioPath != sideBPath {
+			t.Errorf("track %d SourceAudioPath = %v, want %s", num, tr, sideBPath)
 		}
 	}
 
@@ -424,9 +452,18 @@ FILE "side_b.flac" FLAC
 		t.Errorf("expected side_b.flac to be hidden")
 	}
 
-	// Verify SourceAudioPaths
-	if len(album.SourceAudioPaths) != 2 || album.SourceAudioPaths[0] != sideAPath || album.SourceAudioPaths[1] != sideBPath {
-		t.Errorf("unexpected SourceAudioPaths: %+v", album.SourceAudioPaths)
+	// Verify the set of source audio paths across all tracks. Order and the
+	// album-level SourceAudioPaths list are not part of the DirState contract —
+	// production consumes the paths as a set (HiddenMonoliths) and per-track
+	// (Slice.SourceAudioPath), so that is what the test locks in.
+	sources := map[string]bool{}
+	for num := 1; num <= 4; num++ {
+		if tr := trackByNum(state, num); tr != nil {
+			sources[tr.Slice.SourceAudioPath] = true
+		}
+	}
+	if len(sources) != 2 || !sources[sideAPath] || !sources[sideBPath] {
+		t.Errorf("unexpected source audio paths across tracks: %+v", sources)
 	}
 
 	if facts == nil || facts.dirModTime.IsZero() {
@@ -530,37 +567,17 @@ FILE "side_a.flac" FLAC
 	if state == nil {
 		t.Fatalf("expected non-nil state from valid cue")
 	}
-	if len(state.Albums) != 1 {
-		t.Fatalf("expected exactly 1 album (02_valid.cue), got %d", len(state.Albums))
+	if len(state.TracksByName) != 1 {
+		t.Fatalf("expected exactly 1 virtual track (only 02_valid.cue can build), got %d", len(state.TracksByName))
 	}
-	if state.Albums[0].CuePath != filepath.Join(tmpDir, "02_valid.cue") {
-		t.Errorf("expected 02_valid.cue to succeed, got %s", state.Albums[0].CuePath)
+	if !state.HiddenMonoliths["side_a.flac"] {
+		t.Errorf("expected side_a.flac to be hidden (claimed by 02_valid.cue)")
 	}
 
 	logs := buf.String()
 	if !strings.Contains(logs, "audio file not found for cue") || !strings.Contains(logs, "missing_side_b.flac") {
 		t.Errorf("expected warning for missing_side_b.flac, got: %s", logs)
 	}
-}
-
-func makeWavHeader(rate, chans, bps uint32, durationSec float64) []byte {
-	byteRate := rate * chans * (bps / 8)
-	dataSize := uint32(durationSec * float64(byteRate))
-	buf := new(bytes.Buffer)
-	buf.WriteString("RIFF")
-	binary.Write(buf, binary.LittleEndian, uint32(36+dataSize))
-	buf.WriteString("WAVE")
-	buf.WriteString("fmt ")
-	binary.Write(buf, binary.LittleEndian, uint32(16))
-	binary.Write(buf, binary.LittleEndian, uint16(1)) // PCM
-	binary.Write(buf, binary.LittleEndian, uint16(chans))
-	binary.Write(buf, binary.LittleEndian, rate)
-	binary.Write(buf, binary.LittleEndian, byteRate)
-	binary.Write(buf, binary.LittleEndian, uint16(chans*(bps/8)))
-	binary.Write(buf, binary.LittleEndian, uint16(bps))
-	buf.WriteString("data")
-	binary.Write(buf, binary.LittleEndian, dataSize)
-	return buf.Bytes()
 }
 
 func TestBuildDirState_MultiFileCue_ProbedDurationAndMixedQuality(t *testing.T) {
@@ -588,14 +605,14 @@ FILE "side_b.flac" FLAC
 	}
 
 	// Side A: 48kHz, 2 channels, 24-bit WAV, 100 seconds duration
-	sideAWav := makeWavHeader(48000, 2, 24, 100.0)
+	sideAWav := testutil.WavHeader(48000, 2, 24, 100.0)
 	sideAPath := filepath.Join(tmpDir, "side_a.wav")
 	if err := os.WriteFile(sideAPath, sideAWav, 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	// Side B: 96kHz, 2 channels, 24-bit FLAC, 200 seconds duration (96000 * 200 samples)
-	sideBFlac := makeFlacHeaderWithSamples(96000, 2, 24, 96000*200)
+	sideBFlac := testutil.FlacHeaderWithSamples(96000, 2, 24, 96000*200)
 	sideBPath := filepath.Join(tmpDir, "side_b.flac")
 	if err := os.WriteFile(sideBPath, sideBFlac, 0644); err != nil {
 		t.Fatal(err)
@@ -612,17 +629,15 @@ FILE "side_b.flac" FLAC
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if state == nil || len(state.Albums) != 1 {
-		t.Fatalf("expected 1 album, got: %+v", state)
-	}
-
-	album := state.Albums[0]
-	if len(album.Tracks) != 4 {
-		t.Fatalf("expected 4 tracks, got %d", len(album.Tracks))
+	if state == nil || len(state.TracksByName) != 4 {
+		t.Fatalf("expected 4 tracks, got: %+v", state)
 	}
 
 	// Verify Track 2 (last track of Side A) has End set to probed duration of Side A (100.0s)
-	tr2 := album.Tracks[1]
+	tr2 := trackByNum(state, 2)
+	if tr2 == nil {
+		t.Fatalf("expected track 2, got: %+v", state.TracksByName)
+	}
 	if tr2.Slice.End != 100.0 {
 		t.Errorf("track 2 End = %f, want 100.0 (probed WAV duration)", tr2.Slice.End)
 	}
@@ -634,7 +649,10 @@ FILE "side_b.flac" FLAC
 	}
 
 	// Verify Track 4 (last track of Side B) has End set to probed duration of Side B (200.0s)
-	tr4 := album.Tracks[3]
+	tr4 := trackByNum(state, 4)
+	if tr4 == nil {
+		t.Fatalf("expected track 4, got: %+v", state.TracksByName)
+	}
 	if tr4.Slice.End != 200.0 {
 		t.Errorf("track 4 End = %f, want 200.0 (probed FLAC duration)", tr4.Slice.End)
 	}
@@ -654,3 +672,310 @@ FILE "side_b.flac" FLAC
 	}
 }
 
+// TestRealignSourcePathCase pins the mechanism: probe literals that differ
+// in case from the on-disk name get rewritten to the on-disk name, exact
+// matches stay untouched, and track slices follow the album-level paths.
+func TestRealignSourcePathCase(t *testing.T) {
+	tmpDir := t.TempDir()
+	for _, name := range []string{"ALBUM.FLAC", "album.cue", "other.flac"} {
+		if err := os.WriteFile(filepath.Join(tmpDir, name), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Escaped declared name: FILE "../audio/monolith.flac" is joined verbatim
+	// by the resolver; its basename is not in this directory's readdir, so
+	// realign must be a no-op. Rewriting it (e.g. to a normalized form)
+	// would corrupt a path that audio.Probe and ffmpeg open without a
+	// norm retry.
+	escaped := filepath.Join(filepath.Dir(tmpDir), "audio", "monolith.flac")
+
+	albums := []*Album{
+		{
+			// "album.flac" probe literal, on disk it is "ALBUM.FLAC".
+			SourceAudioPaths: []string{filepath.Join(tmpDir, "album.flac")},
+			Tracks: []VirtualTrack{
+				{Slice: track.Slice{SourceAudioPath: filepath.Join(tmpDir, "album.flac")}},
+				{Slice: track.Slice{SourceAudioPath: filepath.Join(tmpDir, "ALBUM.FLAC")}}, // already on-disk
+			},
+		},
+		{
+			// Exact match: must be a no-op.
+			SourceAudioPaths: []string{filepath.Join(tmpDir, "other.flac")},
+			Tracks:           []VirtualTrack{{Slice: track.Slice{SourceAudioPath: filepath.Join(tmpDir, "other.flac")}}},
+		},
+		{
+			// Outside the album directory: must survive realign verbatim.
+			SourceAudioPaths: []string{escaped},
+			Tracks:           []VirtualTrack{{Slice: track.Slice{SourceAudioPath: escaped}}},
+		},
+	}
+
+	(&albumBuilder{dirPath: tmpDir}).realignSourcePathCase(albums)
+
+	if got := albums[0].SourceAudioPaths[0]; got != filepath.Join(tmpDir, "ALBUM.FLAC") {
+		t.Errorf("SourceAudioPaths[0] = %q, want %q (realigned to on-disk name)", got, filepath.Join(tmpDir, "ALBUM.FLAC"))
+	}
+	if got := albums[0].Tracks[0].Slice.SourceAudioPath; got != filepath.Join(tmpDir, "ALBUM.FLAC") {
+		t.Errorf("Tracks[0] source = %q, want %q", got, filepath.Join(tmpDir, "ALBUM.FLAC"))
+	}
+	if got := albums[0].Tracks[1].Slice.SourceAudioPath; got != filepath.Join(tmpDir, "ALBUM.FLAC") {
+		t.Errorf("Tracks[1] source = %q, want %q (exact on-disk name untouched)", got, filepath.Join(tmpDir, "ALBUM.FLAC"))
+	}
+	if got := albums[1].SourceAudioPaths[0]; got != filepath.Join(tmpDir, "other.flac") {
+		t.Errorf("exact-match source = %q, want %q (no-op)", got, filepath.Join(tmpDir, "other.flac"))
+	}
+	if got := albums[2].SourceAudioPaths[0]; got != escaped {
+		t.Errorf("escaped source = %q, want verbatim %q (no-op)", got, escaped)
+	}
+	if got := albums[2].Tracks[0].Slice.SourceAudioPath; got != escaped {
+		t.Errorf("escaped track source = %q, want verbatim %q (no-op)", got, escaped)
+	}
+}
+
+// TestRealignSourcePathCase_NFDPreservedByteExact locks the NFD half of
+// realignment: when the cue declares the NFC form but the file is stored in
+// NFD bytes (byte-exact host), the realigned source path must be the
+// byte-exact readdir name — not the NFC-normalized equivalent. audio.Probe
+// and ffmpeg open the raw path with no NFC/NFD retry, so an NFC output
+// would break slicing exactly like the old case bug broke case-sensitive
+// hosts. The assertion is host-independent: after realignment, a direct
+// os.Stat (no fallback) must find the file.
+func TestRealignSourcePathCase_NFDPreservedByteExact(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	nfdName := norm.NFD.String("Épisode 1") + ".flac"
+	if err := os.WriteFile(filepath.Join(tmpDir, nfdName), testutil.FlacHeader(44100, 2, 16), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cueContent := `TITLE "NFD Album"
+PERFORMER "Artist"
+FILE "Épisode 1.flac" WAVE
+  TRACK 01 AUDIO
+    TITLE "Track 1"
+    INDEX 01 00:00:00`
+	if err := os.WriteFile(filepath.Join(tmpDir, "album.cue"), []byte(cueContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dirFi, err := os.Stat(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, _, err := buildDirState(tmpDir, dirFi, nil, track.Quality{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if state == nil || len(state.TracksByName) != 1 {
+		t.Fatalf("expected 1 track, got %+v", state)
+	}
+
+	want := filepath.Join(tmpDir, nfdName)
+	for _, vt := range state.TracksByName {
+		got := vt.Slice.SourceAudioPath
+		if got != want {
+			t.Errorf("SourceAudioPath = %q, want byte-exact on-disk %q", got, want)
+		}
+		if _, err := os.Stat(got); err != nil {
+			t.Errorf("realigned path %q must open via plain os.Stat (NFC form would fail on byte-exact hosts): %v", got, err)
+		}
+	}
+
+	// Escaped source paths live outside the album dir: their basename is not
+	// in the realign directory listing, so realign must leave the byte-exact
+	// NFD form untouched instead of folding it to NFC.
+	escaped := filepath.Join(filepath.Dir(tmpDir), "up", norm.NFD.String("Épisode 9")+".flac")
+	album := &Album{
+		SourceAudioPaths: []string{escaped},
+		Tracks:           []VirtualTrack{{Slice: track.Slice{SourceAudioPath: escaped}}},
+	}
+	(&albumBuilder{dirPath: tmpDir}).realignSourcePathCase([]*Album{album})
+	if got := album.SourceAudioPaths[0]; got != escaped {
+		t.Errorf("escaped source = %q, want verbatim %q (NFC form would break byte-exact hosts)", got, escaped)
+	}
+	if got := album.Tracks[0].Slice.SourceAudioPath; got != escaped {
+		t.Errorf("escaped track source = %q, want verbatim %q (NFC form would break byte-exact hosts)", got, escaped)
+	}
+}
+
+// TestBuildDirState_HiddenMonolithKeyMatchesReadDirName locks the APFS
+// monolith leak end-to-end: the resolver resolves the declared "album.flac"
+// onto on-disk "ALBUM.FLAC" (case folding on a case-insensitive host). The
+// hidden-monolith key must be the name readdir reports, or the exact-string
+// listing lookup misses and the audio file leaks into the virtual directory.
+// On a case-sensitive host the same property must hold via the unclaimed
+// scan (which returns the real name), so the test is host-independent.
+func TestBuildDirState_HiddenMonolithKeyMatchesReadDirName(t *testing.T) {
+	tmpDir := t.TempDir()
+	cueContent := `TITLE "Case Album"
+PERFORMER "Artist"
+FILE "album.flac" WAVE
+  TRACK 01 AUDIO
+    TITLE "Track 1"
+    INDEX 01 00:00:00`
+	if err := os.WriteFile(filepath.Join(tmpDir, "album.cue"), []byte(cueContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "ALBUM.FLAC"), []byte("not a real flac"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dirFi, err := os.Stat(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, _, err := buildDirState(tmpDir, dirFi, nil, track.Quality{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if state == nil || len(state.TracksByName) != 1 {
+		t.Fatalf("expected 1 track, got %+v", state)
+	}
+
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	onDisk := ""
+	for _, e := range entries {
+		if e.Name() != "album.cue" {
+			onDisk = e.Name()
+		}
+	}
+	if onDisk == "" {
+		t.Fatal("expected the audio file in the directory listing")
+	}
+	if !state.HiddenMonoliths[onDisk] {
+		t.Errorf("HiddenMonoliths[%q] = false, want true (key must be the on-disk name)", onDisk)
+	}
+	// readdir names are matched byte-for-byte, so the probe literal must not
+	// be the key when it differs from the on-disk name.
+	if state.HiddenMonoliths["album.flac"] {
+		t.Errorf("HiddenMonoliths has probe literal %q, want it realigned to %q", "album.flac", onDisk)
+	}
+}
+
+// TestBuildDirState_DiskPipeline drives the entire build pipeline against a
+// real temporary directory: cue parsing, audio probing, size estimation,
+// monolith hiding and artwork mirroring all run end-to-end on the disk the
+// way the production mount does.
+func TestBuildDirState_DiskPipeline(t *testing.T) {
+	cueContent := `TITLE "Test Album"
+PERFORMER "Test Artist"
+FILE "audio.flac" WAVE
+  TRACK 01 AUDIO
+    TITLE "Track 1"
+    INDEX 01 00:00:00`
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "album.cue"), []byte(cueContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "audio.flac"), testutil.FlacHeader(44100, 2, 16), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "cover.jpg"), []byte("fake-jpeg"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dirFi, err := os.Stat(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, facts, err := buildDirState(tmpDir, dirFi, nil, track.Quality{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if state == nil {
+		t.Fatal("expected non-nil DirState")
+	}
+	if len(state.TracksByName) != 1 {
+		t.Fatalf("expected 1 track, got %d", len(state.TracksByName))
+	}
+	for _, vt := range state.TracksByName {
+		if vt.EstimatedSize <= 0 {
+			t.Errorf("track %q EstimatedSize = %d, want > 0 (probe must run on disk)", vt.FileName, vt.EstimatedSize)
+		}
+		wantSrc := filepath.Join(tmpDir, "audio.flac")
+		if vt.Slice.SourceAudioPath != wantSrc {
+			t.Errorf("source = %q, want %q", vt.Slice.SourceAudioPath, wantSrc)
+		}
+		// Flat layout embeds artwork into tracks rather than mirroring it.
+		wantArt := filepath.Join(tmpDir, "cover.jpg")
+		if vt.Slice.ArtworkPath != wantArt {
+			t.Errorf("artwork = %q, want %q (artwork lookup must run on disk)", vt.Slice.ArtworkPath, wantArt)
+		}
+	}
+	if !state.HiddenMonoliths["audio.flac"] {
+		t.Errorf("expected audio.flac to be hidden")
+	}
+	if facts == nil || facts.dirModTime.IsZero() {
+		t.Errorf("expected valid facts")
+	}
+}
+
+// trackByNum returns the virtual track with the given track number from the
+// flat track table. TracksByName is a map (lookups in production go by
+// filename), so the tests address tracks by number instead of by index into
+// an unreachable Album.Tracks slice.
+func trackByNum(state *DirState, num int) *VirtualTrack {
+	for _, vt := range state.TracksByName {
+		if vt.Num == num {
+			return vt
+		}
+	}
+	return nil
+}
+
+// TestBuildDirState_MultiAlbumSubdirCollisionSuffixesWholeName locks the
+// virtual-subdirectory collision scheme: a second album with the same
+// fractional disc number must get a whole-name suffix ("CD1.5 (2)"), not an
+// extension-split one ("CD1 (2).5").
+func TestBuildDirState_MultiAlbumSubdirCollisionSuffixesWholeName(t *testing.T) {
+	tmpDir := t.TempDir()
+	mkAlbum := func(name, file, disc string) {
+		cue := "REM DISCNUMBER " + disc + "\n" +
+			"TITLE \"Album " + name + "\"\n" +
+			"PERFORMER \"Artist\"\n" +
+			"FILE \"" + file + "\" WAVE\n" +
+			"  TRACK 01 AUDIO\n" +
+			"    TITLE \"Track " + name + "\"\n" +
+			"    INDEX 01 00:00:00\n"
+		if err := os.WriteFile(filepath.Join(tmpDir, name+".cue"), []byte(cue), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmpDir, file), make([]byte, 1024*1024), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mkAlbum("side_a", "a.flac", "1.5")
+	mkAlbum("side_b", "b.flac", "1.5")
+
+	dirFi, err := os.Stat(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, _, err := buildDirState(tmpDir, dirFi, nil, track.Quality{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if state == nil {
+		t.Fatal("expected non-nil DirState")
+	}
+	if len(state.TracksByName) != 0 {
+		t.Errorf("expected flat TracksByName to be empty (multi-album => subdirs), got %d", len(state.TracksByName))
+	}
+	if len(state.Subdirs) != 2 {
+		t.Fatalf("expected 2 subdirs, got %d", len(state.Subdirs))
+	}
+	first := state.Subdirs["CD1.5"]
+	if first == nil || len(first.TracksByName) != 1 {
+		t.Errorf("CD1.5 subdir missing or wrong track count: %+v", first)
+	}
+	second := state.Subdirs["CD1.5 (2)"]
+	if second == nil || len(second.TracksByName) != 1 {
+		t.Errorf("CD1.5 (2) subdir missing or wrong track count: %+v", second)
+	}
+	if !state.HiddenMonoliths["a.flac"] || !state.HiddenMonoliths["b.flac"] {
+		t.Errorf("expected both monoliths hidden, got %v", state.HiddenMonoliths)
+	}
+}

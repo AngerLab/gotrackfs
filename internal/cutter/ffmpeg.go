@@ -55,10 +55,17 @@ func (c *FFmpeg) SetMaxConcurrency(n int) {
 	c.sem = make(chan struct{}, n)
 }
 
-// SetTimeout configures the timeout for ffmpeg cut operations.
-func (c *FFmpeg) SetTimeout(d time.Duration) {
-	c.timeout = d
-}
+// ffmpeg audio filter chains. See BuildArgs for why these exact profiles are used.
+const (
+	// Dither filter for depth conversion to 16-bit or shallower: f-weighted noise
+	// shaping turns quantization error into decorrelated noise pushed into
+	// inaudible frequencies instead of signal-correlated distortion.
+	audioFilterDepthDither = "aresample=resampler=swr:dither_method=f_weighted"
+
+	// High-precision 64-tap swr resampler for rate-only caps (or rate caps with
+	// depth above 16): default profile is adequate for 192->96kHz material.
+	audioFilterRateOnly = "aresample=resampler=swr:filter_size=64:phase_shift=12:cutoff=0.949"
+)
 
 // BuildArgs constructs the CLI arguments for ffmpeg.
 func (c *FFmpeg) BuildArgs(req track.Slice, outputPath string) []string {
@@ -98,10 +105,10 @@ func (c *FFmpeg) BuildArgs(req track.Slice, outputPath string) []string {
 		// harmonics on quiet tones). swr also covers any rate conversion in
 		// the same stage; for 192->96 material its default profile is more
 		// than adequate.
-		args = append(args, "-af", "aresample=resampler=swr:dither_method=f_weighted")
+		args = append(args, "-af", audioFilterDepthDither)
 	case req.TargetSampleRate > 0:
 		// Rate-only cap (or rate cap with bit depth > 16): high-precision 64-tap swr resampler, depth untouched.
-		args = append(args, "-af", "aresample=resampler=swr:filter_size=64:phase_shift=12:cutoff=0.949")
+		args = append(args, "-af", audioFilterRateOnly)
 	}
 	if req.TargetSampleRate > 0 {
 		args = append(args, "-ar", strconv.Itoa(req.TargetSampleRate))

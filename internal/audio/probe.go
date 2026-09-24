@@ -3,8 +3,9 @@ package audio
 import (
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
-	"strings"
 )
 
 // ErrNotSupported is returned when the audio format is not supported or duration cannot be determined.
@@ -30,12 +31,44 @@ type Info struct {
 // If the container is not FLAC/WAV, direct header parsing fails, or WAV duration cannot be determined,
 // it falls back to ffprobe. On total failure, it wraps ErrNotSupported with underlying diagnostic causes.
 func Probe(filePath string) (Info, error) {
-	ext := strings.ToLower(filepath.Ext(filePath))
+	ext := filepath.Ext(filePath)
 	var directErr error
 
-	switch ext {
-	case ".flac":
-		flacInfo, err := probeFLACInfo(filePath)
+	// Direct header parsing covers FLAC and WAV only; other containers go
+	// straight to ffprobe without opening the file. An open failure is not
+	// fatal either: it is recorded as the direct error, ffprobe still gets
+	// its turn, and only a total failure surfaces as ErrNotSupported.
+	if IsFLACExt(ext) || IsWAVExt(ext) {
+		f, err := os.Open(filePath)
+		if err != nil {
+			directErr = fmt.Errorf("probe: open %s: %w", filePath, err)
+		} else {
+			info, probeErr := probeDirect(f, ext)
+			_ = f.Close()
+			if probeErr == nil {
+				return info, nil
+			}
+			directErr = probeErr
+		}
+	} else {
+		directErr = fmt.Errorf("unsupported container extension %q", ext)
+	}
+
+	ffprobeInfo, ffprobeErr := probeWithFFprobe(filePath)
+	if ffprobeErr == nil {
+		return ffprobeInfo, nil
+	}
+
+	return Info{}, fmt.Errorf("%w (direct: %v; ffprobe: %v)", ErrNotSupported, directErr, ffprobeErr)
+}
+
+// probeDirect parses container headers from r. It covers FLAC and WAV in
+// pure Go; everything else is unsupported here and left to the ffprobe
+// fallback in Probe.
+func probeDirect(r io.ReadSeeker, ext string) (Info, error) {
+	switch {
+	case IsFLACExt(ext):
+		flacInfo, err := probeFLACInfo(r)
 		if err == nil && flacInfo.Format.SampleRate > 0 && flacInfo.TotalSamples > 0 {
 			dur := float64(flacInfo.TotalSamples) / float64(flacInfo.Format.SampleRate)
 			return Info{
@@ -44,15 +77,14 @@ func Probe(filePath string) (Info, error) {
 			}, nil
 		}
 		if err != nil {
-			directErr = fmt.Errorf("flac parser: %w", err)
+			return Info{}, fmt.Errorf("flac parser: %w", err)
 		} else if flacInfo.Format.SampleRate == 0 {
-			directErr = errors.New("flac parser: zero sample rate")
-		} else {
-			directErr = errors.New("flac parser: zero total samples (streaming FLAC)")
+			return Info{}, errors.New("flac parser: zero sample rate")
 		}
+		return Info{}, errors.New("flac parser: zero total samples (streaming FLAC)")
 
-	case ".wav", ".wave":
-		wavInfo, err := probeWAVInfo(filePath)
+	case IsWAVExt(ext):
+		wavInfo, err := probeWAVInfo(r)
 		if err == nil && wavInfo.HasFmt && wavInfo.Format.SampleRate > 0 && wavInfo.ByteRate > 0 && wavInfo.DataSize > 0 {
 			dur := float64(wavInfo.DataSize) / float64(wavInfo.ByteRate)
 			return Info{
@@ -61,21 +93,13 @@ func Probe(filePath string) (Info, error) {
 			}, nil
 		}
 		if err != nil {
-			directErr = fmt.Errorf("wav parser: %w", err)
+			return Info{}, fmt.Errorf("wav parser: %w", err)
 		} else if !wavInfo.HasFmt || wavInfo.Format.SampleRate == 0 {
-			directErr = errors.New("wav parser: missing or invalid fmt chunk")
-		} else {
-			directErr = errors.New("wav parser: data chunk missing or zero size")
+			return Info{}, errors.New("wav parser: missing or invalid fmt chunk")
 		}
+		return Info{}, errors.New("wav parser: data chunk missing or zero size")
 
 	default:
-		directErr = fmt.Errorf("unsupported container extension %q", ext)
+		return Info{}, fmt.Errorf("unsupported container extension %q", ext)
 	}
-
-	info, ffprobeErr := probeWithFFprobe(filePath)
-	if ffprobeErr == nil {
-		return info, nil
-	}
-
-	return Info{}, fmt.Errorf("%w (direct: %v; ffprobe: %v)", ErrNotSupported, directErr, ffprobeErr)
 }

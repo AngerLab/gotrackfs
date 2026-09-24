@@ -2,7 +2,10 @@ package vfs
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
+
+	"github.com/AngerLab/gotrackfs/internal/audio"
 )
 
 // findAllCueFiles returns all .cue files in the specified directory.
@@ -20,9 +23,40 @@ func findAllCueFiles(dir string) ([]string, error) {
 	return cueFiles, nil
 }
 
+// probeOrder is the sequence in which stem-derived candidates are tried by
+// the resolver: lowercase extensions first (historical priority), then the
+// uppercase variants so that on-disk .FLAC/.WAV/.WAVE files resolve on
+// case-sensitive filesystems. The list is derived from audio.AudioExtensions
+// — the single membership truth: adding an extension there (say .opus) adds
+// both its lowercase and uppercase probes here instead of silently
+// diverging. (A hand-written uppercase list had already drifted — .WAVE was
+// missing; deriving the variants from membership closes that class of bug.)
+// Probe order itself is a resolver concern; membership and base ordering
+// live in the audio package.
+var probeOrder = func() []string {
+	order := slices.Clone(audio.AudioExtensions)
+	for _, ext := range audio.AudioExtensions {
+		order = append(order, strings.ToUpper(ext))
+	}
+	return order
+}()
+
+// resolveAudioByStem searches dir for a file named stem + <audio extension>,
+// probing in probeOrder order (lowercase stems first, then .FLAC/.WAV).
+func resolveAudioByStem(dir, stem string, claimed map[string]bool) string {
+	for _, ext := range probeOrder {
+		p := filepath.Join(dir, stem+ext)
+		if fi, err := statPath(p); err == nil && !fi.IsDir() && !claimed[p] {
+			return p
+		}
+	}
+	return ""
+}
+
 // resolveAudioFileForCue resolves the matching monolithic audio file for a CUE sheet.
 // It checks declared filename, matching stem with audio extensions, and single unclaimed audio.
-func resolveAudioFileForCue(dir, cuePath, declaredName string, claimed map[string]bool) string {
+func (b *albumBuilder) resolveAudioFileForCue(cuePath, declaredName string, claimed map[string]bool) string {
+	dir := b.dirPath
 	// 1. Declared name in CUE
 	if declaredName != "" {
 		p := filepath.Join(dir, declaredName)
@@ -36,22 +70,16 @@ func resolveAudioFileForCue(dir, cuePath, declaredName string, claimed map[strin
 
 		// Stem + audio extensions
 		stem := strings.TrimSuffix(filepath.Base(declaredName), filepath.Ext(declaredName))
-		for _, ext := range []string{".flac", ".wav", ".ape", ".wv", ".m4a", ".mp3", ".FLAC", ".WAV"} {
-			cand := filepath.Join(dir, stem+ext)
-			if fi, err := statPath(cand); err == nil && !fi.IsDir() && !claimed[cand] {
-				return cand
-			}
+		if p := resolveAudioByStem(dir, stem, claimed); p != "" {
+			return p
 		}
 	}
 
 	// 2. Same stem as CUE file
 	cueBase := filepath.Base(cuePath)
 	cueStem := strings.TrimSuffix(cueBase, filepath.Ext(cueBase))
-	for _, ext := range []string{".flac", ".wav", ".ape", ".wv", ".m4a", ".mp3", ".FLAC", ".WAV"} {
-		cand := filepath.Join(dir, cueStem+ext)
-		if fi, err := statPath(cand); err == nil && !fi.IsDir() && !claimed[cand] {
-			return cand
-		}
+	if p := resolveAudioByStem(dir, cueStem, claimed); p != "" {
+		return p
 	}
 
 	// 3. If only one unclaimed audio file exists in directory
@@ -62,13 +90,12 @@ func resolveAudioFileForCue(dir, cuePath, declaredName string, claimed map[strin
 			if e.IsDir() {
 				continue
 			}
-			ext := strings.ToLower(filepath.Ext(e.Name()))
-			switch ext {
-			case ".flac", ".wav", ".ape", ".wv", ".m4a", ".mp3":
-				cand := filepath.Join(dir, e.Name())
-				if !claimed[cand] {
-					unclaimed = append(unclaimed, cand)
-				}
+			if !audio.IsAudioExt(filepath.Ext(e.Name())) {
+				continue
+			}
+			cand := filepath.Join(dir, e.Name())
+			if !claimed[cand] {
+				unclaimed = append(unclaimed, cand)
 			}
 		}
 		if len(unclaimed) == 1 {

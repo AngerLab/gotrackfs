@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
-	"os"
 )
 
 type wavHeaderInfo struct {
@@ -14,16 +13,10 @@ type wavHeaderInfo struct {
 	HasFmt   bool
 }
 
-// probeWAVInfo reads RIFF WAVE header fmt and data chunks, returning container info.
-func probeWAVInfo(filePath string) (wavHeaderInfo, error) {
-	f, err := os.Open(filePath)
-	if err != nil {
-		return wavHeaderInfo{}, err
-	}
-	defer f.Close()
-
+// probeWAVInfo reads RIFF WAVE header fmt and data chunks from r, returning container info.
+func probeWAVInfo(r io.ReadSeeker) (wavHeaderInfo, error) {
 	var header [12]byte
-	if _, err := io.ReadFull(f, header[:]); err != nil {
+	if _, err := io.ReadFull(r, header[:]); err != nil {
 		return wavHeaderInfo{}, err
 	}
 
@@ -35,7 +28,7 @@ func probeWAVInfo(filePath string) (wavHeaderInfo, error) {
 
 	for {
 		var chunkHeader [8]byte
-		if _, err := io.ReadFull(f, chunkHeader[:]); err != nil {
+		if _, err := io.ReadFull(r, chunkHeader[:]); err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
 				break
 			}
@@ -47,7 +40,7 @@ func probeWAVInfo(filePath string) (wavHeaderInfo, error) {
 
 		if chunkID == "fmt " && chunkSize >= 16 {
 			var fmtData [16]byte
-			if _, err := io.ReadFull(f, fmtData[:]); err != nil {
+			if _, err := io.ReadFull(r, fmtData[:]); err != nil {
 				return info, err
 			}
 			info.Format.Channels = int(binary.LittleEndian.Uint16(fmtData[2:4]))
@@ -60,7 +53,7 @@ func probeWAVInfo(filePath string) (wavHeaderInfo, error) {
 				remaining++
 			}
 			if remaining > 0 {
-				if _, err := f.Seek(remaining, io.SeekCurrent); err != nil {
+				if _, err := r.Seek(remaining, io.SeekCurrent); err != nil {
 					return info, err
 				}
 			}
@@ -73,7 +66,7 @@ func probeWAVInfo(filePath string) (wavHeaderInfo, error) {
 			if skip%2 != 0 {
 				skip++
 			}
-			if _, err := f.Seek(skip, io.SeekCurrent); err != nil {
+			if _, err := r.Seek(skip, io.SeekCurrent); err != nil {
 				break
 			}
 		}

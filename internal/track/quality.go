@@ -61,11 +61,16 @@ func ValidateBits(b int) (int, error) {
 	return 0, fmt.Errorf("bit depth %d is not supported (FFmpeg FLAC encoder only supports 16 and 24)", b)
 }
 
+// maxImplicitKHz is the largest bare number (no unit suffix) still interpreted as kHz.
+// Values above it are treated as plain Hz, e.g. "96" -> 96000 but "96000" -> 96000.
+const maxImplicitKHz = 384
+
 // ParseRate parses a sample-rate cap string (e.g. "44.1", "48", "96", "44.1k", "96kHz", "44100", "96000").
 // Empty string or "0" means unlimited (returns 0, nil).
 //
-// Values <= 384 or containing a decimal point without an explicit unit suffix are interpreted as kHz
-// (e.g. "96" -> 96000 Hz, "44.1" -> 44100 Hz), whereas values > 384 without suffix are interpreted as Hz (e.g. "96000").
+// Values <= maxImplicitKHz or containing a decimal point without an explicit unit suffix are
+// interpreted as kHz (e.g. "96" -> 96000 Hz, "44.1" -> 44100 Hz), whereas values above it
+// without suffix are interpreted as Hz (e.g. "96000").
 func ParseRate(spec string) (int, error) {
 	raw := strings.TrimSpace(spec)
 	if raw == "" || raw == "0" {
@@ -92,7 +97,7 @@ func ParseRate(spec string) (int, error) {
 		return 0, fmt.Errorf("sample rate %q must be positive", raw)
 	}
 	// If no explicit unit suffix was provided and value is in kHz range (< 1000 with decimal or standard kHz value), treat as kHz.
-	if multiplier == 1.0 && (strings.Contains(s, ".") || rate <= 384) {
+	if multiplier == 1.0 && (strings.Contains(s, ".") || rate <= maxImplicitKHz) {
 		multiplier = 1000
 	}
 	rateHz := int(math.Round(rate * multiplier))

@@ -105,16 +105,24 @@ func parseFFprobeJSON(data []byte) (Info, error) {
 		}
 	}
 
-	if probeData.Format.Duration != "" && probeData.Format.Duration != "N/A" {
-		if dur, err := strconv.ParseFloat(probeData.Format.Duration, 64); err == nil && dur > 0 {
-			info.Duration = dur
-		}
-	}
-	if info.Duration == 0 && stream.Duration != "" && stream.Duration != "N/A" {
-		if dur, err := strconv.ParseFloat(stream.Duration, 64); err == nil && dur > 0 {
-			info.Duration = dur
-		}
+	// Prefer the container-level duration, fall back to the stream-level one.
+	if dur := durationSeconds(probeData.Format.Duration); dur > 0 {
+		info.Duration = dur
+	} else if dur := durationSeconds(stream.Duration); dur > 0 {
+		info.Duration = dur
 	}
 
 	return info, nil
+}
+
+// durationSeconds parses an ffprobe duration string ("123.456" or "N/A"),
+// returning 0 when it is unparseable or absent.
+func durationSeconds(s string) float64 {
+	if s == "" || s == "N/A" {
+		return 0
+	}
+	if dur, err := strconv.ParseFloat(s, 64); err == nil && dur > 0 {
+		return dur
+	}
+	return 0
 }

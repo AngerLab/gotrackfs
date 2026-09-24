@@ -94,29 +94,15 @@ func main() {
 		log.Fatalf("mount point directory does not exist: %s", absMount)
 	}
 
-	// Initialize audio cutter if ffmpeg is available
-	var slicer vfs.TrackSlicer
-	ffmpegCutter, err := cutter.NewFFmpeg("", logger)
-	if err != nil {
-		logger.Warn("ffmpeg not found in PATH: audio slicing is disabled (install ffmpeg to enable virtual track playback)", "error", err)
-	} else {
-		cutterMgr, err := cutter.NewManager(cutter.Options{
-			Cutter: ffmpegCutter,
-			TTL:    cacheTTL,
-			Logger: logger,
-		})
-		if err != nil {
-			logger.Warn("failed to initialize audio cache manager: audio slicing is disabled", "error", err)
-		} else {
-			defer cutterMgr.Close()
-			slicer = cutterMgr
-		}
+	// A nil slicer disables virtual track playback (Open returns ENOSYS).
+	slicer := newSlicer(cacheTTL, logger)
+	if slicer != nil {
+		defer slicer.Close()
 	}
 
 	fs := vfs.New(vfs.Options{
 		SourceRoot: absSource,
 		KeepAlbum:  keepAlbum,
-		Debug:      debug,
 		Logger:     logger,
 		Slicer:     slicer,
 		MaxQuality: maxQuality,
@@ -153,4 +139,25 @@ func main() {
 	if !host.Mount(absMount, fuseOpts) {
 		log.Fatalf("failed to mount FUSE filesystem at %s", absMount)
 	}
+}
+
+// newSlicer initializes the audio cache manager backed by ffmpeg.
+// It returns nil (disabling virtual track playback) when ffmpeg is missing
+// or the cache manager cannot be constructed.
+func newSlicer(ttl time.Duration, logger *slog.Logger) *cutter.TrackCacheManager {
+	ffmpegCutter, err := cutter.NewFFmpeg("", logger)
+	if err != nil {
+		logger.Warn("ffmpeg not found in PATH: audio slicing is disabled (install ffmpeg to enable virtual track playback)", "error", err)
+		return nil
+	}
+	manager, err := cutter.NewManager(cutter.Options{
+		Cutter: ffmpegCutter,
+		TTL:    ttl,
+		Logger: logger,
+	})
+	if err != nil {
+		logger.Warn("failed to initialize audio cache manager: audio slicing is disabled", "error", err)
+		return nil
+	}
+	return manager
 }

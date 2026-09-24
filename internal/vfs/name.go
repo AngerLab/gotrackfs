@@ -39,6 +39,32 @@ func addFilenameSuffix(filename string, suffix int) string {
 	return fmt.Sprintf("%s (%d)%s", stem, suffix, ext)
 }
 
+// uniqueName returns base as-is when it is free, otherwise the first
+// "base (n)" variant (n = 2, 3, ...) that is free. collided reports
+// whether a suffix had to be added. taken must be safe to call repeatedly.
+func uniqueName(base string, taken func(string) bool) (name string, collided bool) {
+	return uniqueNameWith(base, addFilenameSuffix, taken)
+}
+
+// uniqueNamePlain is uniqueName without extension splitting: the suffix is
+// appended to the whole name. Use it for names where the last dot is not an
+// extension separator (e.g. virtual subdirectories such as "CD1.5").
+func uniqueNamePlain(base string, taken func(string) bool) (name string, collided bool) {
+	return uniqueNameWith(base, func(name string, n int) string { return fmt.Sprintf("%s (%d)", name, n) }, taken)
+}
+
+func uniqueNameWith(base string, suffix func(string, int) string, taken func(string) bool) (name string, collided bool) {
+	if !taken(base) {
+		return base, false
+	}
+	for i := 2; ; i++ {
+		candidate := suffix(base, i)
+		if !taken(candidate) {
+			return candidate, true
+		}
+	}
+}
+
 // formatTrackFilename generates the virtual track filename.
 func formatTrackFilename(num int, trackArtist, albumArtist, title, ext string) string {
 	cleanTitle := sanitizeFilename(title)

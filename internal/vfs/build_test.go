@@ -11,7 +11,9 @@ import (
 
 	"github.com/AngerLab/gotrackfs/internal/audio"
 	"github.com/AngerLab/gotrackfs/internal/testutil"
+
 	"github.com/AngerLab/gotrackfs/internal/track"
+	"golang.org/x/text/unicode/norm"
 )
 
 func TestBuildDirState_Pure(t *testing.T) {
@@ -705,6 +707,55 @@ func TestRealignSourcePathCase(t *testing.T) {
 	}
 	if got := albums[1].SourceAudioPaths[0]; got != filepath.Join(tmpDir, "other.flac") {
 		t.Errorf("exact-match source = %q, want %q (no-op)", got, filepath.Join(tmpDir, "other.flac"))
+	}
+}
+
+// TestRealignSourcePathCase_NFDPreservedByteExact locks the NFD half of
+// realignment: when the cue declares the NFC form but the file is stored in
+// NFD bytes (byte-exact host), the realigned source path must be the
+// byte-exact readdir name — not the NFC-normalized equivalent. audio.Probe
+// and ffmpeg open the raw path with no NFC/NFD retry, so an NFC output
+// would break slicing exactly like the old case bug broke case-sensitive
+// hosts. The assertion is host-independent: after realignment, a direct
+// os.Stat (no fallback) must find the file.
+func TestRealignSourcePathCase_NFDPreservedByteExact(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	nfdName := norm.NFD.String("Épisode 1") + ".flac"
+	if err := os.WriteFile(filepath.Join(tmpDir, nfdName), makeFlacHeader(44100, 2, 16), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cueContent := `TITLE "NFD Album"
+PERFORMER "Artist"
+FILE "Épisode 1.flac" WAVE
+  TRACK 01 AUDIO
+    TITLE "Track 1"
+    INDEX 01 00:00:00`
+	if err := os.WriteFile(filepath.Join(tmpDir, "album.cue"), []byte(cueContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dirFi, err := os.Stat(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, _, err := buildDirState(tmpDir, dirFi, nil, track.Quality{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if state == nil || len(state.TracksByName) != 1 {
+		t.Fatalf("expected 1 track, got %+v", state)
+	}
+
+	want := filepath.Join(tmpDir, nfdName)
+	for _, vt := range state.TracksByName {
+		got := vt.Slice.SourceAudioPath
+		if got != want {
+			t.Errorf("SourceAudioPath = %q, want byte-exact on-disk %q", got, want)
+		}
+		if _, err := os.Stat(got); err != nil {
+			t.Errorf("realigned path %q must open via plain os.Stat (NFC form would fail on byte-exact hosts): %v", got, err)
+		}
 	}
 }
 

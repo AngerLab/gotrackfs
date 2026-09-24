@@ -361,21 +361,27 @@ func (b *albumBuilder) realignSourcePathCase(albums []*Album) {
 		}
 		return
 	}
-	names := make([]string, 0, len(entries))
-	exact := make(map[string]bool, len(entries))
+	// NFC query key -> byte-exact on-disk name. The on-disk name must be
+	// returned verbatim, not the NFC form: audio probing and ffmpeg open
+	// the real path without an NFC/NFD retry, so a realigned path that is
+	// merely normalized-equivalent still fails on byte-exact filesystems.
+	onDisk := make(map[string]string, len(entries))
+	var names []string
 	for _, e := range entries {
 		n := norm.NFC.String(e.Name())
-		names = append(names, n)
-		exact[n] = true
+		if _, seen := onDisk[n]; !seen {
+			names = append(names, n)
+			onDisk[n] = e.Name()
+		}
 	}
 	onDiskName := func(p string) string {
 		base := norm.NFC.String(filepath.Base(p))
-		if exact[base] {
-			return base
+		if exact, ok := onDisk[base]; ok {
+			return exact
 		}
 		for _, n := range names {
 			if strings.EqualFold(n, base) {
-				return n
+				return onDisk[n]
 			}
 		}
 		return base

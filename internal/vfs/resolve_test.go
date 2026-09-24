@@ -1,6 +1,7 @@
 package vfs
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -148,3 +149,52 @@ func TestFindAllCueFiles(t *testing.T) {
 // wavBytes returns a minimal non-empty payload (the resolver only cares
 // about existence, not audio validity).
 func wavBytes() []byte { return []byte("RIFF....WAVEfmt ") }
+
+// TestResolveAudio_HostFSCaseSemantics pins resolveAudioFileForCue against a
+// REAL host filesystem, whatever its case behavior is:
+//
+//   - case-sensitive host (Linux ext4): probe order is honored — album.wav
+//     beats album.FLAC, because Stat("album.flac") misses and .wav is tried
+//     next;
+//   - case-insensitive host (APFS, NTFS): the first lookup already folds —
+//     Stat("album.flac") matches album.FLAC, so .wav never gets a turn and
+//     the returned path is the literal "album.flac" (which the host resolves
+//     to album.FLAC).
+//
+// The probe-order contract therefore holds only on case-sensitive
+// filesystems; production on macOS inherits the host's folding. This is the
+// exact scenario that failed on APFS before the resolver moved to hostfs.FS,
+// and it must keep passing on both Mac and Linux.
+func TestResolveAudio_HostFSCaseSemantics(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "album.wav"), wavBytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "album.FLAC"), []byte("fLaC chunk"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := resolveAudioFileForCue(hostfs.Default(), dir, filepath.Join(dir, "album.cue"), "album.flac", map[string]bool{})
+
+	if hostCaseSensitive(dir) {
+		if want := filepath.Join(dir, "album.wav"); got != want {
+			t.Errorf("resolveAudioFileForCue = %q, want %q (case-sensitive host: probe order honored, .wav must beat .FLAC)", got, want)
+		}
+	} else {
+		if want := filepath.Join(dir, "album.flac"); got != want {
+			t.Errorf("resolveAudioFileForCue = %q, want %q (case-insensitive host: the .flac lookup already case-folds onto album.FLAC)", got, want)
+		}
+	}
+}
+
+// hostCaseSensitive reports whether dir lives on a case-sensitive filesystem
+// by creating a probe file and looking it up under a different case.
+// Best-effort: on write failure it assumes sensitive rather than failing.
+func hostCaseSensitive(dir string) bool {
+	probe := filepath.Join(dir, "caseprobe")
+	if err := os.WriteFile(probe, nil, 0o644); err != nil {
+		return true
+	}
+	_, err := os.Stat(filepath.Join(dir, "CASEPROBE"))
+	return os.IsNotExist(err)
+}

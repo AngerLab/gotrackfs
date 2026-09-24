@@ -1,14 +1,26 @@
 // Package hostfs abstracts the real filesystem behind a small interface,
 // modeled after cockroachdb/pebble/vfs: production code and tests both talk
-// to FS instead of calling os.* directly. The minimal surface is exactly
-// what gotrackfs needs today (stat + directory listing); it grows as
-// consumers appear (YAGNI).
+// to FS instead of calling os.* directly. The surface is what gotrackfs
+// needs today — stat, directory listing and file reads (cue parsing, audio
+// probing); it grows as consumers appear (YAGNI).
 package hostfs
 
 import (
+	"io"
 	"io/fs"
 	"os"
 )
+
+// File is a readable file handle returned by FS.Open. The surface covers the
+// current consumers: streaming reads (cue parser), offset reads (future FUSE
+// reads) and seek (audio header probing). os.File and bytes.Reader both
+// satisfy it.
+type File interface {
+	io.Reader
+	io.ReaderAt
+	io.Seeker
+	io.Closer
+}
 
 // FS is a namespace for files. Names are platform filepath names.
 //
@@ -23,9 +35,14 @@ type FS interface {
 	// List returns a listing of the given directory. The entries are
 	// relative to dir (same semantics as os.ReadDir).
 	List(dir string) ([]fs.DirEntry, error)
+
+	// Open opens an existing file for reading. It must return an error
+	// wrapping fs.ErrNotExist when missing and fs.ErrInvalid when name
+	// names a directory.
+	Open(name string) (File, error)
 }
 
-// Default returns an FS backed by the real disk (os.Stat/os.ReadDir).
+// Default returns an FS backed by the real disk (os.Stat/os.ReadDir/os.Open).
 func Default() FS { return diskFS{} }
 
 type diskFS struct{}
@@ -34,3 +51,4 @@ func (diskFS) Stat(name string) (os.FileInfo, error) { return os.Stat(name) }
 func (diskFS) List(dir string) ([]fs.DirEntry, error) {
 	return os.ReadDir(dir)
 }
+func (diskFS) Open(name string) (File, error) { return os.Open(name) }

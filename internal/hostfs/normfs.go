@@ -52,3 +52,21 @@ func (n *normFallbackFS) List(dir string) ([]fs.DirEntry, error) {
 	}
 	return e, err
 }
+
+func (n *normFallbackFS) Open(name string) (File, error) {
+	f, err := n.FS.Open(name)
+	if err == nil || !errors.Is(err, fs.ErrNotExist) {
+		return f, err
+	}
+	for _, normPath := range []string{norm.NFD.String(name), norm.NFC.String(name)} {
+		if normPath == name {
+			continue
+		}
+		if f2, err2 := n.FS.Open(normPath); err2 == nil {
+			return f2, nil
+		}
+	}
+	return f, err
+}
+
+var _ FS = (*normFallbackFS)(nil)

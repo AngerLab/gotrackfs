@@ -1,6 +1,7 @@
 package hostfs
 
 import (
+	"bytes"
 	"fmt"
 	"io/fs"
 	"os"
@@ -106,6 +107,34 @@ func (m *MemFS) List(dir string) ([]fs.DirEntry, error) {
 	}
 	return entries, nil
 }
+
+// Open implements FS. The returned handle reads a point-in-time snapshot of
+// the file's bytes; MemFS files are immutable after AddFile.
+func (m *MemFS) Open(name string) (File, error) {
+	m.mu.RLock()
+	n, ok := m.lookup(name)
+	if !ok {
+		m.mu.RUnlock()
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
+	}
+	if n.isDir {
+		m.mu.RUnlock()
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
+	}
+	data := append([]byte(nil), n.data...)
+	m.mu.RUnlock()
+	return &memFile{r: bytes.NewReader(data)}, nil
+}
+
+// memFile is an immutable in-memory file handle over a byte snapshot.
+type memFile struct{ r *bytes.Reader }
+
+func (f *memFile) Read(p []byte) (int, error)              { return f.r.Read(p) }
+func (f *memFile) ReadAt(p []byte, off int64) (int, error) { return f.r.ReadAt(p, off) }
+func (f *memFile) Seek(off int64, whence int) (int64, error) {
+	return f.r.Seek(off, whence)
+}
+func (f *memFile) Close() error { return nil }
 
 // lookup resolves a nested path from the root. Dir paths may have a
 // trailing slash; the root itself is "/".

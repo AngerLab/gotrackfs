@@ -25,12 +25,21 @@ func findAllCueFiles(dir string) ([]string, error) {
 
 // probeOrder is the sequence in which stem-derived candidates are tried by
 // the resolver: lowercase extensions first (historical priority), then the
-// uppercase literals so that .FLAC/.WAV files resolve on case-sensitive
-// filesystems. The list is derived from audio.AudioExtensions — the single
-// membership truth: adding an extension there (say .opus) is automatically
-// picked up here instead of silently diverging. Probe order itself is a
-// resolver concern; membership and base ordering live in the audio package.
-var probeOrder = append(slices.Clone(audio.AudioExtensions), ".FLAC", ".WAV")
+// uppercase variants so that on-disk .FLAC/.WAV/.WAVE files resolve on
+// case-sensitive filesystems. The list is derived from audio.AudioExtensions
+// — the single membership truth: adding an extension there (say .opus) adds
+// both its lowercase and uppercase probes here instead of silently
+// diverging. (A hand-written uppercase list had already drifted — .WAVE was
+// missing; deriving the variants from membership closes that class of bug.)
+// Probe order itself is a resolver concern; membership and base ordering
+// live in the audio package.
+var probeOrder = func() []string {
+	order := slices.Clone(audio.AudioExtensions)
+	for _, ext := range audio.AudioExtensions {
+		order = append(order, strings.ToUpper(ext))
+	}
+	return order
+}()
 
 // resolveAudioByStem searches dir for a file named stem + <audio extension>,
 // probing in probeOrder order (lowercase stems first, then .FLAC/.WAV).

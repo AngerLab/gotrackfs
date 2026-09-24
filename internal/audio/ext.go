@@ -6,13 +6,15 @@ import "strings"
 // extensions, kept lowercase because matching is case-insensitive
 // (IsAudioExt uses EqualFold), so uppercase variants such as .FLAC need no
 // explicit entries. Element order is significant: the vfs resolver derives
-// its probe order from this list (extension order, then the .FLAC/.WAV
-// uppercase variants), so membership changes here propagate to resolution.
+// its probe order from this list (extension order, then the matching
+// uppercase variants, derived from membership), so changes here propagate
+// to resolution.
 //
 // .wave is deliberately included: IsWAVExt has always accepted it (the
 // prober parses WAV containers), so membership now matches what the prober
-// handles. On main, .wave files were never resolved as cue sources — the
-// resolver only probes and counts extensions from this list.
+// handles. The vfs resolver derives its probe and unclaimed-audio counts
+// from this list, so membership here is what makes .wave cue sources
+// resolvable — a behavioral fix on top of the pre-existing prober support.
 var AudioExtensions = []string{".flac", ".wav", ".wave", ".ape", ".wv", ".m4a", ".mp3"}
 
 // IsAudioExt reports whether ext (e.g. ".Flac") is a recognized audio extension.

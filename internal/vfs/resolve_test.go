@@ -180,3 +180,25 @@ func hostCaseSensitive(dir string) bool {
 	_, err := os.Stat(filepath.Join(dir, "CASEPROBE"))
 	return os.IsNotExist(err)
 }
+
+// TestResolveAudio_UppercaseWaveProbe pins the .WAVE uppercase probe: on a
+// case-sensitive host an on-disk album.WAVE is only found through the
+// uppercase literal; on a case-insensitive host the lowercase .wave probe
+// already case-folds onto it. probeOrder derives its uppercase variants
+// from AudioExtensions, so this also guards against derivation regressions.
+func TestResolveAudio_UppercaseWaveProbe(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFiles(t, dir, "album.WAVE")
+
+	got := resolveWith(dir, filepath.Join(dir, "album.cue"), "album.flac", map[string]bool{})
+
+	if hostCaseSensitive(dir) {
+		if want := filepath.Join(dir, "album.WAVE"); got != want {
+			t.Errorf("resolveAudioFileForCue = %q, want %q (case-sensitive host: .WAVE uppercase probe must hit)", got, want)
+		}
+	} else {
+		if want := filepath.Join(dir, "album.wave"); got != want {
+			t.Errorf("resolveAudioFileForCue = %q, want %q (case-insensitive host: .wave probe case-folds onto on-disk album.WAVE)", got, want)
+		}
+	}
+}

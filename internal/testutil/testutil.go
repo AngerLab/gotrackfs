@@ -8,6 +8,7 @@ package testutil
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 )
 
 // FlacHeader returns a minimal FLAC file with a valid STREAMINFO block for the
@@ -18,7 +19,12 @@ func FlacHeader(rate, chans, bps uint64) []byte {
 
 // FlacHeaderWithSamples returns a minimal FLAC file with a valid STREAMINFO
 // block carrying the given total sample count (for duration assertions).
+// chans and bps must be >= 1: the STREAMINFO packing encodes them as
+// chans-1/bps-1, so zero would silently underflow into garbage framing.
 func FlacHeaderWithSamples(rate, chans, bps, totalSamples uint64) []byte {
+	if chans == 0 || bps == 0 {
+		panic(fmt.Sprintf("testutil: FlacHeader requires chans >= 1 and bps >= 1, got chans=%d bps=%d", chans, bps))
+	}
 	var buf bytes.Buffer
 	buf.WriteString("fLaC")
 	buf.Write([]byte{0x80, 0x00, 0x00, 34}) // isLast=1, type=0, len=34

@@ -2,6 +2,7 @@ package vfs
 
 import (
 	"bytes"
+	"io"
 	"log/slog"
 	"math"
 	"os"
@@ -214,9 +215,13 @@ FILE "audio.flac" WAVE
 			if err := os.WriteFile(filepath.Join(tmpDir, "album.cue"), []byte(cueContent), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			audio := testutil.FlacHeader(tt.srcRate, 2, tt.srcBits)
+			var audio []byte
 			if tt.srcRate == 0 {
+				// Broken-header row: build the junk directly instead of
+				// letting FlacHeader underflow on bps == 0.
 				audio = []byte("junk not a flac at all")
+			} else {
+				audio = testutil.FlacHeader(tt.srcRate, 2, tt.srcBits)
 			}
 			if err := os.WriteFile(filepath.Join(tmpDir, "audio.flac"), audio, 0o644); err != nil {
 				t.Fatal(err)
@@ -298,10 +303,14 @@ FILE "audio.flac" WAVE
 
 func TestAudioQualityPlan_WavRatioWithoutCap(t *testing.T) {
 	srcFmt := audio.Format{SampleRate: 96000, Bits: 24}
+	// Never pass a nil logger here: audioQualityPlan dereferences it in the
+	// capped branch, and relying on a branch staying unreachable is a
+	// footgun (the production caller always passes one anyway).
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Without a quality cap the targets stay zero, but the WAV->FLAC size
 	// ratio must still apply (EstimatedSize drives Getattr before any cut).
-	targetRate, targetBits, wavRatio := audioQualityPlan(track.Quality{}, srcFmt, nil, filepath.FromSlash("/tmp/x.wav"), nil)
+	targetRate, targetBits, wavRatio := audioQualityPlan(track.Quality{}, srcFmt, nil, filepath.FromSlash("/tmp/x.wav"), discard)
 	if targetRate != 0 || targetBits != 0 {
 		t.Errorf("no cap: targets = (%d, %d), want (0, 0)", targetRate, targetBits)
 	}
@@ -309,9 +318,18 @@ func TestAudioQualityPlan_WavRatioWithoutCap(t *testing.T) {
 		t.Errorf("no cap WAV: ratio = %f, want %f", wavRatio, wavToFlacSizeRatio)
 	}
 
-	_, _, flacRatio := audioQualityPlan(track.Quality{}, srcFmt, nil, filepath.FromSlash("/tmp/x.flac"), nil)
+	_, _, flacRatio := audioQualityPlan(track.Quality{}, srcFmt, nil, filepath.FromSlash("/tmp/x.flac"), discard)
 	if flacRatio != 1.0 {
 		t.Errorf("no cap FLAC: ratio = %f, want 1.0", flacRatio)
+	}
+
+	// Cap already satisfied by the source: Plan yields zero targets, which
+	// exercises the logger.Debug branch inside audioQualityPlan — a case
+	// that previously panicked with a nil logger and was only "saved" by
+	// the branch being unreachable in every existing test.
+	targetRate, targetBits, _ = audioQualityPlan(track.Quality{Bits: 16, SampleRate: 44100}, audio.Format{SampleRate: 44100, Bits: 16}, nil, filepath.FromSlash("/tmp/x.flac"), discard)
+	if targetRate != 0 || targetBits != 0 {
+		t.Errorf("cap already met: targets = (%d, %d), want (0, 0)", targetRate, targetBits)
 	}
 
 	// With a cap the WAV factor composes with the quality downscale.

@@ -151,6 +151,13 @@ func (m *TrackCacheManager) getOrCreateEntry(key string, req track.Slice) (*trac
 	select {
 	case <-entry.done:
 		if entry.err != nil {
+			// Defensive: runCut sets entry.err, deletes the entry from the
+			// map on failure, and only then closes done — all under m.mu,
+			// which this function still holds across the select. So an entry
+			// found in the map with done closed is always a successful cached
+			// cut (err == nil); errored entries vanish from the map before
+			// their done fires. This branch guards against a future refactor
+			// that reorders delete/close, not against a real racer.
 			return nil, false, entry.err
 		}
 		entry.users++

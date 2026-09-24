@@ -224,6 +224,9 @@ func (b *albumBuilder) virtualTracksForFile(sheet *cue.Sheet, f *cue.File, cuePa
 // targets; the ratio still accounts for WAV sources always being compressed
 // to FLAC (~0.60).
 func audioQualityPlan(maxQuality track.Quality, srcFmt audio.Format, probeErr error, audioPath string, logger *slog.Logger) (targetRate, targetBits int, qualityRatio float64) {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	qualityRatio = 1.0
 	if !maxQuality.Unset() && probeErr == nil {
 		targetRate, targetBits = maxQuality.Plan(srcFmt.SampleRate, srcFmt.Bits)

@@ -126,7 +126,7 @@ func (v *VFS) resolve(path, op string) resolvedNode {
 	// 1. The directory itself has cached state (real dir with virtual content,
 	//    or a real dir without any): classify base against it.
 	if dirState := v.dirStateFor(dir, cleanPath, op); dirState != nil {
-		return v.resolveInDirState(dirState, base, dir, realPath)
+		return v.resolveInDirState(dirState, base, realPath)
 	}
 
 	// 2. dir may be a virtual subdirectory inside a real parent
@@ -154,7 +154,7 @@ func (v *VFS) dirStateFor(dir, cleanPath, op string) *DirState {
 
 // resolveInDirState classifies base against the cached state of its directory:
 // a virtual subdirectory, a hidden monolith, a virtual track, or a real entry.
-func (v *VFS) resolveInDirState(dirState *DirState, base, dir, realPath string) resolvedNode {
+func (v *VFS) resolveInDirState(dirState *DirState, base, realPath string) resolvedNode {
 	if subState, ok := dirState.Subdirs[base]; ok {
 		return resolvedNode{kind: nodeKindVirtualDir, realPath: realPath, subDirState: subState}
 	}
@@ -397,7 +397,10 @@ func (v *VFS) openTrack(node resolvedNode) (int, uint64) {
 
 	tempPath, err := v.slicer.Acquire(v.ctx, node.track.CutterKey, node.track.Slice)
 	if err != nil {
-		if err != context.Canceled {
+		// During teardown Acquire fails with "cutter cache manager is closed"
+		// (or ctx cancellation); logging those at Error level only adds noise
+		// while everything is shutting down anyway.
+		if v.ctx.Err() == nil && err != context.Canceled {
 			v.logger.Error("vfs: failed to slice audio track", "track", node.track.FileName, "error", err)
 		}
 		return -fuse.EIO, ^uint64(0)
@@ -473,10 +476,6 @@ func (v *VFS) Read(path string, buff []byte, ofst int64, fh uint64) int {
 	v.mu.Unlock()
 
 	if !ok {
-		return -fuse.EBADF
-	}
-
-	if f := h.file; f == nil {
 		return -fuse.EBADF
 	}
 

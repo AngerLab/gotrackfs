@@ -40,9 +40,17 @@ type Options struct {
 	Logger     *slog.Logger              // Optional structured logger. If nil, a default text logger is used.
 	Slicer     *cutter.TrackCacheManager // Optional audio slicer. If nil, virtual track playback is disabled (Open returns ENOSYS).
 
-	// FS backs all real-filesystem access (stat, listing). If nil, the
-	// production filesystem is used (real disk with NFC/NFD fallback).
-	// Tests inject hostfs.NewMem() to run the whole VFS layer without disk.
+	// FS backs all filesystem access of the directory-state pipeline:
+	// listing, stat, and file reads for resolution, cue parsing, audio
+	// probing and artwork. If nil, the production filesystem is used (real
+	// disk with NFC/NFD fallback). Tests inject hostfs.NewMem() to run the
+	// entire build pipeline without a disk.
+	//
+	// The FUSE runtime layer still touches the real filesystem in two
+	// places by design: symlink-aware lstat for real entries
+	// (statRealPath/copyStat) and opening source audio for the slicer
+	// (openRealFile). MemFS injection covers the pipeline and cache, not
+	// those ops.
 	FS hostfs.FS
 
 	// MaxQuality optionally caps the output format of sliced tracks.

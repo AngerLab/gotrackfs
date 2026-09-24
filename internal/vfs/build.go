@@ -64,8 +64,8 @@ func buildDirState(fs hostfs.FS, dirPath string, dirFi os.FileInfo, logger *slog
 	realignSourcePathCase(fs, dirPath, albums, logger)
 
 	dirState := baseDirState(albums)
-	realNames, artwork := scanDirEntries(dirPath)
-	assignArtwork(albums, findPrimaryArtwork(artwork))
+	realNames, artwork := scanDirEntries(fs, dirPath)
+	assignArtwork(fs, albums, findPrimaryArtwork(artwork))
 	// Cutter keys must be computed after artwork: Slice.Key() hashes ArtworkPath.
 	finalizeTrackCutterKeys(albums)
 
@@ -99,10 +99,21 @@ func collectAlbums(fs hostfs.FS, dirPath string, cueFiles []string, logger *slog
 	return albums
 }
 
+// parseCueFile reads and parses a CUE sheet through fs so the whole build
+// pipeline can run against MemFS in tests.
+func parseCueFile(fs hostfs.FS, cuePath string) (*cue.Sheet, error) {
+	f, err := fs.Open(cuePath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return cue.Parse(f)
+}
+
 // buildAlbumFromCue parses one CUE sheet and materializes its virtual tracks.
 // skip is true when the sheet must be ignored (unparseable, empty, or already split).
 func buildAlbumFromCue(fs hostfs.FS, dirPath, cuePath string, claimedAudios map[string]bool, logger *slog.Logger, maxQuality track.Quality) (*Album, bool) {
-	sheet, err := cue.ParseFile(cuePath)
+	sheet, err := parseCueFile(fs, cuePath)
 	if err != nil {
 		logger.Warn("vfs: skipping invalid cue file", "path", cuePath, "error", err)
 		return nil, true
@@ -167,7 +178,7 @@ func virtualTracksForFile(fs hostfs.FS, dirPath, cuePath string, sheet *cue.Shee
 		return nil, "", false
 	}
 
-	audioInfo, probeErr := audio.Probe(audioPath)
+	audioInfo, probeErr := audio.ProbeFS(fs, audioPath)
 	if probeErr != nil {
 		logger.Debug("vfs: failed to probe audio file", "audio", audioPath, "error", probeErr)
 	}
@@ -401,10 +412,13 @@ func baseDirState(albums []*Album) *DirState {
 	return dirState
 }
 
-// scanDirEntries lists the real directory once and classifies entries into
-// occupied names (for collision avoidance) and artwork candidates.
-func scanDirEntries(dirPath string) (realNames map[string]bool, artwork map[string]string) {
-	rawEntries, _ := os.ReadDir(dirPath)
+// scanDirEntries lists the directory once through fs and classifies entries
+// into occupied names (for collision avoidance) and artwork candidates.
+func scanDirEntries(fs hostfs.FS, dirPath string) (realNames map[string]bool, artwork map[string]string) {
+	rawEntries, err := fs.List(dirPath)
+	if err != nil {
+		rawEntries = nil
+	}
 	realNames = make(map[string]bool, len(rawEntries))
 	artwork = make(map[string]string)
 	for _, re := range rawEntries {
@@ -423,10 +437,10 @@ func scanDirEntries(dirPath string) (realNames map[string]bool, artwork map[stri
 
 // assignArtwork attaches the primary cover art to every virtual track and
 // accounts for its size in the pre-slice estimates.
-func assignArtwork(albums []*Album, artworkPath string) {
+func assignArtwork(fs hostfs.FS, albums []*Album, artworkPath string) {
 	var artworkSize int64
 	if artworkPath != "" {
-		if artFi, err := os.Stat(artworkPath); err == nil {
+		if artFi, err := fs.Stat(artworkPath); err == nil {
 			artworkSize = artFi.Size()
 		}
 	}

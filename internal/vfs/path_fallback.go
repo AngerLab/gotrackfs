@@ -12,8 +12,10 @@ import (
 )
 
 // defaultFS is the production filesystem: the real disk wrapped with the
-// transparent NFC/NFD fallback. All real-disk access goes through it (or
-// through an FS injected via Options.FS) instead of calling os.* directly.
+// transparent NFC/NFD fallback. It backs Options.FS when none is injected.
+// lstatSyscall and openRealFile intentionally operate on the real path:
+// symlink-aware stat and slicer file handles are runtime-only concerns and
+// are not part of the FS abstraction.
 var defaultFS = hostfs.WithNFDFallback(hostfs.Default())
 
 // probeWithNormFallback runs probe on path and, when it fails with

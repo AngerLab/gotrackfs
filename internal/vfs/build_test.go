@@ -764,6 +764,58 @@ FILE "album.flac" WAVE
 	}
 }
 
+// TestBuildDirState_WithoutDisk drives the entire build pipeline against
+// MemFS: cue parsing, audio probing, size estimation, monolith hiding and
+// artwork mirroring all run without touching the real filesystem. Before
+// the hostfs read migration this could not work — cue.ParseFile and the
+// prober opened paths on the real disk, so a MemFS build silently returned
+// an empty state ("skipping invalid cue file" for ENOENT).
+func TestBuildDirState_WithoutDisk(t *testing.T) {
+	cueContent := `TITLE "Test Album"
+PERFORMER "Test Artist"
+FILE "audio.flac" WAVE
+  TRACK 01 AUDIO
+    TITLE "Track 1"
+    INDEX 01 00:00:00`
+	m := hostfs.NewMem().
+		AddFile("/album/album.cue", []byte(cueContent)).
+		AddFile("/album/audio.flac", makeFlacHeader(44100, 2, 16)).
+		AddFile("/album/cover.jpg", []byte("fake-jpeg"))
+
+	dirFi, err := m.Stat("/album")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, facts, err := buildDirState(m, "/album", dirFi, nil, track.Quality{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if state == nil {
+		t.Fatal("expected non-nil DirState")
+	}
+	if len(state.TracksByName) != 1 {
+		t.Fatalf("expected 1 track, got %d", len(state.TracksByName))
+	}
+	for _, vt := range state.TracksByName {
+		if vt.EstimatedSize <= 0 {
+			t.Errorf("track %q EstimatedSize = %d, want > 0 (probe must run in-memory)", vt.FileName, vt.EstimatedSize)
+		}
+		if vt.Slice.SourceAudioPath != "/album/audio.flac" {
+			t.Errorf("source = %q, want %q", vt.Slice.SourceAudioPath, "/album/audio.flac")
+		}
+		// Flat layout embeds artwork into tracks rather than mirroring it.
+		if vt.Slice.ArtworkPath != "/album/cover.jpg" {
+			t.Errorf("artwork = %q, want %q (artwork lookup must run in-memory)", vt.Slice.ArtworkPath, "/album/cover.jpg")
+		}
+	}
+	if !state.HiddenMonoliths["audio.flac"] {
+		t.Errorf("expected audio.flac to be hidden")
+	}
+	if facts == nil || facts.dirModTime.IsZero() {
+		t.Errorf("expected valid facts")
+	}
+}
+
 // trackByNum returns the virtual track with the given track number from the
 // flat track table. TracksByName is a map (lookups in production go by
 // filename), so the tests address tracks by number instead of by index into

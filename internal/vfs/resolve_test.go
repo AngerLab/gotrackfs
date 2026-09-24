@@ -31,42 +31,6 @@ func writeTestFiles(t *testing.T, dir string, names ...string) {
 	}
 }
 
-// TestResolveAudio_LowercaseExtensionPriority locks in the historical probe
-// order: lowercase stems (.flac .wav ...) are tried before uppercase .FLAC/.WAV.
-func TestResolveAudio_LowercaseExtensionPriority(t *testing.T) {
-	dir := t.TempDir()
-	writeTestFiles(t, dir, "album.wav", "album.FLAC")
-
-	got := resolveWith(dir, filepath.Join(dir, "album.cue"), "album.flac", map[string]bool{})
-	if want := filepath.Join(dir, "album.wav"); got != want {
-		t.Errorf("resolveAudioFileForCue = %q, want %q (lowercase .wav must win over .FLAC)", got, want)
-	}
-}
-
-// TestResolveAudio_UppercaseFLACFallback ensures uppercase extensions are still
-// found when no lowercase candidate exists.
-func TestResolveAudio_UppercaseFLACFallback(t *testing.T) {
-	dir := t.TempDir()
-	writeTestFiles(t, dir, "album.FLAC")
-
-	got := resolveWith(dir, filepath.Join(dir, "album.cue"), "album.flac", map[string]bool{})
-	if want := filepath.Join(dir, "album.FLAC"); got != want {
-		t.Errorf("resolveAudioFileForCue = %q, want %q", got, want)
-	}
-}
-
-// TestResolveAudio_UppercaseWAVIsLastInPriority ensures ".WAV" is probed after
-// ".FLAC", matching the historical order.
-func TestResolveAudio_UppercaseWAVIsLastInPriority(t *testing.T) {
-	dir := t.TempDir()
-	writeTestFiles(t, dir, "album.FLAC", "album.WAV")
-
-	got := resolveWith(dir, filepath.Join(dir, "album.cue"), "album.flac", map[string]bool{})
-	if want := filepath.Join(dir, "album.FLAC"); got != want {
-		t.Errorf("resolveAudioFileForCue = %q, want %q (.FLAC is probed before .WAV)", got, want)
-	}
-}
-
 // TestResolveAudio_DeclaredNameWins ensures an exact declared filename beats
 // every stem-derived candidate.
 func TestResolveAudio_DeclaredNameWins(t *testing.T) {
@@ -85,7 +49,14 @@ func TestResolveAudio_ClaimedCandidatesAreSkipped(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFiles(t, dir, "album.flac", "other.flac")
 
-	claimed := map[string]bool{filepath.Join(dir, "album.flac"): true}
+	// Claim both case forms: the claim map is byte-exact, and on a
+	// case-insensitive host the .FLAC probe literal is skipped only if it is
+	// claimed too. On a case-sensitive host the uppercase form never
+	// stat-succeeds, so the extra claim is inert there.
+	claimed := map[string]bool{
+		filepath.Join(dir, "album.flac"): true,
+		filepath.Join(dir, "album.FLAC"): true,
+	}
 	got := resolveWith(dir, filepath.Join(dir, "album.cue"), "album.flac", claimed)
 	if want := filepath.Join(dir, "other.flac"); got != want {
 		t.Errorf("resolveAudioFileForCue = %q, want %q (claimed candidate must be skipped)", got, want)

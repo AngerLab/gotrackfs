@@ -5,7 +5,9 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"golang.org/x/text/unicode/norm"
 )
@@ -65,27 +67,125 @@ func TestMemFS_MissingPaths(t *testing.T) {
 }
 
 func TestMemFS_AddFileReplacesExisting(t *testing.T) {
-	m := NewMem().AddFile("x.bin", []byte("old")).AddFile("x.bin", []byte("new!"))
+	m := NewMem().AddFile("x.bin", []byte("old"))
+	fi1, err := m.Stat("x.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m.AddFile("x.bin", []byte("new!"))
+	fi2, err := m.Stat("x.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi2.Size() != 4 {
+		t.Errorf("file size = %d, want 4 (replaced content)", fi2.Size())
+	}
+	// A write must refresh the file's mtime; a stale mtime would silently
+	// defeat modTime-based cache invalidation.
+	if !fi2.ModTime().After(fi1.ModTime()) {
+		t.Errorf("replacing a file must bump its modTime: before=%v after=%v", fi1.ModTime(), fi2.ModTime())
+	}
+}
+
+func TestMemFS_DirModTimeMatchesOnDiskSemantics(t *testing.T) {
+	m := NewMem().AddDir("alb").AddFile("alb/track.flac", []byte("v1"))
+
+	before := mustModTime(t, m, "alb")
+	m.AddFile("alb/track.flac", []byte("v2")) // overwrite: dir entry unchanged
+	if after := mustModTime(t, m, "alb"); !after.Equal(before) {
+		t.Errorf("overwriting a file must NOT bump the dir mtime (disk semantics): before=%v after=%v", before, after)
+	}
+
+	before = mustModTime(t, m, "alb")
+	m.AddFile("alb/new.cue", nil) // new entry: dir mtime must move
+	if after := mustModTime(t, m, "alb"); !after.After(before) {
+		t.Errorf("adding a new child must bump the dir mtime (disk semantics): before=%v after=%v", before, after)
+	}
+}
+
+func mustModTime(t *testing.T, m FS, name string) time.Time {
+	t.Helper()
+	fi, err := m.Stat(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi.ModTime()
+}
+
+func TestMemFS_StatSnapshotIsImmutable(t *testing.T) {
+	m := NewMem().AddFile("x.bin", []byte("old"))
 	fi, err := m.Stat("x.bin")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fi.Size() != 4 {
-		t.Errorf("file size = %d, want 4 (replaced content)", fi.Size())
+
+	m.AddFile("x.bin", []byte("new!"))
+	// A held FileInfo is a snapshot, like os.Stat's: later writes must not
+	// change what it reports.
+	if fi.Size() != 3 {
+		t.Errorf("held Stat snapshot size = %d, want 3 (\"old\")", fi.Size())
+	}
+}
+
+func TestMemFS_NoPhantomChildrenOnDirFileConflict(t *testing.T) {
+	// dir -> file: children must not survive the conversion.
+	m := NewMem().AddDir("x/y").AddFile("x", []byte("now a file"))
+	fi, err := m.Stat("x")
+	if err != nil || fi.IsDir() {
+		t.Errorf("x = %v, %v; want a plain file", fi, err)
+	}
+	if _, err := m.Stat("x/y"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("phantom child survived dir->file conversion: Stat(x/y) err = %v, want ErrNotExist", err)
+	}
+
+	// file -> deeper path: the walk must not panic on a nil map and the
+	// node becomes a directory again.
+	m2 := NewMem().AddFile("x", []byte("bytes")).AddFile("x/y", []byte("deeper"))
+	if fi, err := m2.Stat("x"); err != nil || !fi.IsDir() {
+		t.Errorf("x = %v, %v; want a directory after a deeper path was added", fi, err)
+	}
+	if _, err := m2.Stat("x/y"); err != nil {
+		t.Errorf("deeper file unreachable: %v", err)
 	}
 }
 
 func TestNFDFallback_FindsNFDStoredFileViaNFCQuery(t *testing.T) {
+	// Byte-exact store (MemFS): the NFC query must miss deterministically.
 	m := NewMem().AddFile(norm.NFD.String("Épisode 1/flac"), nil)
-	plain := Default()
-
-	if _, err := plain.Stat(norm.NFC.String("Épisode 1") + "/flac"); err == nil {
-		t.Fatal("disk-backed default should not match NFD path via NFC query")
+	if _, err := m.Stat(norm.NFC.String("Épisode 1") + "/flac"); err == nil {
+		t.Fatal("MemFS is byte-exact: NFC query must not match the NFD path")
 	}
 
 	// Wrapped FS must transparently find the NFD form.
 	f := WithNFDFallback(m)
 	if _, err := f.Stat(norm.NFC.String("Épisode 1") + "/flac"); err != nil {
+		t.Errorf("WithNFDFallback.Stat(nfc) = %v, want success via NFD retry", err)
+	}
+}
+
+// TestNFDFallback_RealDiskByteExactHost proves the fallback against the real
+// filesystem: on a byte-exact host (Linux ext4, NFS) an NFD-stored name is
+// NOT found through the NFC query, and WithNFDFallback finds it. Hosts with
+// normalization-insensitive filesystems (APFS) skip: there is nothing to prove.
+func TestNFDFallback_RealDiskByteExactHost(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, norm.NFD.String("Épisode 1")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, norm.NFD.String("Épisode 1"), "flac"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	plain := Default()
+	nfcPath := filepath.Join(dir, norm.NFC.String("Épisode 1"), "flac")
+	if _, err := plain.Stat(nfcPath); err == nil {
+		t.Skip("host filesystem is normalization-insensitive; nothing to prove")
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("byte-exact miss must be ErrNotExist, got %v", err)
+	}
+
+	if _, err := WithNFDFallback(plain).Stat(nfcPath); err != nil {
 		t.Errorf("WithNFDFallback.Stat(nfc) = %v, want success via NFD retry", err)
 	}
 }

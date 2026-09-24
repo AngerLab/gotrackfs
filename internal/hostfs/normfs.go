@@ -8,7 +8,7 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
-// WithNFDFallback wraps fs so that any Stat/List that fails with
+// WithNFDFallback wraps fs so that any Stat/List/Open that fails with
 // ErrNotExist is transparently retried on the NFD and NFC normalized forms
 // of the path. Files stored in either normalization on byte-exact
 // filesystems (Linux ext4, exFAT, NFS, SMB) are then found regardless of
@@ -21,52 +21,40 @@ type normFallbackFS struct {
 	FS
 }
 
+// RetryNormForms runs op(name) and, when it fails with fs.ErrNotExist,
+// retries op on the NFD and NFC normalized forms of name. It is the single
+// implementation of the NFC/NFD retry: WithNFDFallback decorates an FS with
+// it, and callers that cannot go through an FS (symlink-aware lstat, slicer
+// file handles) use it directly.
+func RetryNormForms[T any](name string, op func(string) (T, error)) (T, error) {
+	v, err := op(name)
+	if err == nil || !errors.Is(err, fs.ErrNotExist) {
+		return v, err
+	}
+	for _, normName := range []string{norm.NFD.String(name), norm.NFC.String(name)} {
+		if normName == name {
+			continue
+		}
+		if v2, err2 := op(normName); err2 == nil {
+			return v2, nil
+		}
+	}
+	return v, err
+}
+
+// Stat implements FS.
 func (n *normFallbackFS) Stat(name string) (os.FileInfo, error) {
-	s, err := n.FS.Stat(name)
-	if err == nil || !errors.Is(err, fs.ErrNotExist) {
-		return s, err
-	}
-	for _, normPath := range []string{norm.NFD.String(name), norm.NFC.String(name)} {
-		if normPath == name {
-			continue
-		}
-		if s2, err2 := n.FS.Stat(normPath); err2 == nil {
-			return s2, nil
-		}
-	}
-	return s, err
+	return RetryNormForms(name, n.FS.Stat)
 }
 
+// List implements FS.
 func (n *normFallbackFS) List(dir string) ([]fs.DirEntry, error) {
-	e, err := n.FS.List(dir)
-	if err == nil || !errors.Is(err, fs.ErrNotExist) {
-		return e, err
-	}
-	for _, normDir := range []string{norm.NFD.String(dir), norm.NFC.String(dir)} {
-		if normDir == dir {
-			continue
-		}
-		if e2, err2 := n.FS.List(normDir); err2 == nil {
-			return e2, nil
-		}
-	}
-	return e, err
+	return RetryNormForms(dir, n.FS.List)
 }
 
+// Open implements FS.
 func (n *normFallbackFS) Open(name string) (File, error) {
-	f, err := n.FS.Open(name)
-	if err == nil || !errors.Is(err, fs.ErrNotExist) {
-		return f, err
-	}
-	for _, normPath := range []string{norm.NFD.String(name), norm.NFC.String(name)} {
-		if normPath == name {
-			continue
-		}
-		if f2, err2 := n.FS.Open(normPath); err2 == nil {
-			return f2, nil
-		}
-	}
-	return f, err
+	return RetryNormForms(name, n.FS.Open)
 }
 
 var _ FS = (*normFallbackFS)(nil)
